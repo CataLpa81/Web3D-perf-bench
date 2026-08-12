@@ -1,6 +1,14 @@
-# H5 3D Engine Benchmark
+If you are working on, or want to build, Web3D-related features, this project will be very helpful to you.
 
-A reproducible comparison of the default behavior of
+This project benchmarks and compares the performance of three common Web3D engines, helping you fully understand
+their strengths and weaknesses from a performance perspective, as well as the common pitfalls.
+
+Whether you are a Web3D developer, a product manager, or someone who wants to vibe code some 3D content, this is
+a project you should not miss.
+
+# Web 3D Engine Benchmark
+
+The project provides a reproducible comparison of the default behavior of
 [three.js](https://threejs.org/), [Babylon.js](https://www.babylonjs.com/), and
 [PlayCanvas](https://playcanvas.com/).
 
