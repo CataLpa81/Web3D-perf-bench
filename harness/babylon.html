@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>babylon.js harness</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#05060a; }
+  canvas { display:block; }
+  #hud { position:fixed; top:8px; left:8px; color:#0ff; font:12px monospace; z-index:10; white-space:pre; }
+</style>
+<script src="/vendor/babylonjs/babylon.js"></script>
+<script src="/vendor/babylonjs-loaders/babylonjs.loaders.min.js"></script>
+</head>
+<body>
+<div id="hud">babylon booting…</div>
+<canvas id="c"></canvas>
+<script type="module">
+import '/harness/common/probe.js';
+import { createHarness, createFixedStepClock, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
+import { cameraAt } from '/spec/contract.js';
+import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildPhysicsLayout } from '/spec/scene-spec.js';
+
+const params = readParams();
+const { state, info } = createHarness('babylon');
+info.engineVersion = BABYLON.Engine.Version;
+info.gpu = detectGpu();
+info.requested = { ...params };
+const hud = document.getElementById('hud');
+
+const canvas = document.getElementById('c');
+canvas.width = CONTRACT.viewport.w; canvas.height = CONTRACT.viewport.h;
+canvas.style.width = CONTRACT.viewport.w + 'px';
+canvas.style.height = CONTRACT.viewport.h + 'px';
+
+// ---- Engine initialization ----
+const engine = new BABYLON.Engine(canvas, CONTRACT.antialias);
+engine.setHardwareScalingLevel(1 / CONTRACT.devicePixelRatio);
+const gpuTimer = params.coverage > 0 ? createGpuTimer(engine._gl) : null;
+
+const scene = new BABYLON.Scene(engine);
+// Align coordinate handedness so the shared layout is not mirrored.
+scene.useRightHandedSystem = true;
+const cc = CONTRACT.clearColor;
+scene.clearColor = new BABYLON.Color4(cc.r, cc.g, cc.b, cc.a);
+
+const camera = new BABYLON.UniversalCamera('cam', new BABYLON.Vector3(0, 0, 0), scene);
+camera.fov = CONTRACT.camera.fov * Math.PI / 180;
+camera.minZ = CONTRACT.camera.near;
+camera.maxZ = CONTRACT.camera.far;
+scene.activeCamera = camera;
+
+info.renderWidth = engine.getRenderWidth(true);
+info.renderHeight = engine.getRenderHeight(true);
+
+// ---- Shared directional light ----
+{
+  const A = CONTRACT.baseLight;
+  const intensity = params.coverage > 0 ? A.pbrPixelIntensity : A.intensity;
+  const base = new BABYLON.DirectionalLight('baseLight',
+    new BABYLON.Vector3(A.direction.x, A.direction.y, A.direction.z), scene);
+  base.intensity = intensity;
+  base.diffuse = new BABYLON.Color3(A.color.r, A.color.g, A.color.b);
+  info.actual.baseLight = 'DirectionalLight intensity=' + intensity;
+}
+
+// ---- Lights ----
+const lights = [];
+for (const L of buildLightLayout(params.lights)) {
+  const light = new BABYLON.PointLight('pl' + L.i, new BABYLON.Vector3(L.x, L.y, L.z), scene);
+  light.range = L.range;
+  light.diffuse = new BABYLON.Color3(L.r, L.g, L.b);
+  light.intensity = L.intensity;
+  light._layout = L;
+  lights.push(light);
+}
+
+// ---- Objects ----
+// Leave maxSimultaneousLights at Babylon's default.
+const objects = [];
+const objectCount = params.objects;
+if (objectCount > 0) {
+  const seg = segForTriangles(params.triangles, objectCount);
+  // Flip winding for Babylon's right-handed front-face convention.
+  const grid = buildGrid(seg, true);
+  const mat = new BABYLON.PBRMaterial('mat', scene);
+  mat.albedoColor = new BABYLON.Color3(0.69, 0.74, 0.78);
+  mat.metallic = 0; mat.roughness = 1;
+  const layout = buildObjectLayout(objectCount);
+
+  const applyVertexData = (mesh) => {
+    const vd = new BABYLON.VertexData();
+    vd.positions = grid.positions; vd.normals = grid.normals;
+    vd.uvs = grid.uvs; vd.indices = grid.indices;
+    vd.applyToMesh(mesh);
+  };
+
+  for (const it of layout) {
+    const mesh = new BABYLON.Mesh('obj' + it.i, scene);
+    applyVertexData(mesh);
+    mesh.material = mat;
+    mesh.position = new BABYLON.Vector3(it.x, it.y, it.z);
+    mesh.rotation = new BABYLON.Vector3(0, it.rotationY, 0);
+    mesh.scaling = new BABYLON.Vector3(it.scale, it.scale, it.scale);
+    mesh._layout = it;
+    objects.push(mesh);
+  }
+  info.actual.triangleCountPerMesh = grid.triangleCount;
+  info.actual.seg = seg;
+  info.actual.totalTriangles = grid.triangleCount * objectCount;
+  info.actual.vertexCountPerMesh = grid.vertexCount;
+  // Record the default without changing it.
+  info.defaults.maxSimultaneousLights = mat.maxSimultaneousLights;
+}
+
+// ---- Physics: Havok ----
+const physBodies = [];
+let havokEnabled = false;
+const PHYS_DT = 1 / 60;
+const physicsClock = createFixedStepClock({ stepSeconds: PHYS_DT });
+if (params.bodies > 0) {
+  const HK = await import('/vendor/@babylonjs/havok/lib/esm/HavokPhysics_es.js');
+  const havok = await HK.default({
+    locateFile: () => '/vendor/@babylonjs/havok/lib/esm/HavokPhysics.wasm',
+  });
+  // The render-only baseline does not initialize Havok.
+  let plugin = null;
+  if (params.animate) {
+    plugin = new BABYLON.HavokPlugin(true, havok);
+    scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), plugin);
+    havokEnabled = true;
+  }
+
+  const L = buildPhysicsLayout(params.bodies);
+  const gSize = L.groundSize;
+  const ground = BABYLON.MeshBuilder.CreateBox('pground', { width: gSize, height: 1, depth: gSize }, scene);
+  ground.position.y = -0.5;
+  const gm = new BABYLON.PBRMaterial('pgm', scene);
+  gm.albedoColor = new BABYLON.Color3(0.10, 0.11, 0.14);
+  gm.metallic = 0; gm.roughness = 1;
+  ground.material = gm;
+  if (havokEnabled) new BABYLON.PhysicsAggregate(ground, BABYLON.PhysicsShapeType.BOX, { mass: 0 }, scene);
+
+  // Share geometry and material across instances.
+  const src = BABYLON.MeshBuilder.CreateBox('pbox', { size: L.size }, scene);
+  const bm = new BABYLON.PBRMaterial('pbm', scene);
+  bm.albedoColor = new BABYLON.Color3(0.75, 0.50, 0.31);
+  bm.metallic = 0; bm.roughness = 1;
+  src.material = bm;
+  // Disable per-instance culling to match the single instanced submission path.
+  src.alwaysSelectAsActiveMesh = true;
+  for (const it of L.items) {
+    const m = it.i === 0 ? src : src.createInstance('pb' + it.i);
+    m.alwaysSelectAsActiveMesh = true;
+    m.position = new BABYLON.Vector3(it.x, it.y, it.z);
+    if (havokEnabled) {
+      const agg = new BABYLON.PhysicsAggregate(m, BABYLON.PhysicsShapeType.BOX, { mass: it.mass }, scene);
+      agg.body.setLinearVelocity(new BABYLON.Vector3(it.vx, 0, it.vz));
+      physBodies.push(agg);
+    } else {
+      physBodies.push({ transformNode: m });
+    }
+  }
+  // Disable automatic physics advancement and use the shared fixed-step clock.
+  if (havokEnabled) scene.physicsEnabled = false;
+  info.actual.bodies = physBodies.length;
+  info.actual.physicsEngine = 'Havok (@babylonjs/havok)';
+  info.actual.physFixedStep = PHYS_DT;
+}
+
+// ---- Skeletal animation ----
+// AssetContainer creates independent skeletons and retargeted animation groups.
+const skinnedChars = [];
+if (params.skinned > 0) {
+  const container = await BABYLON.SceneLoader.LoadAssetContainerAsync('/assets/', params.model, scene);
+  const srcGroup = container.animationGroups[0];
+  const layout = buildObjectLayout(params.skinned, { scale: 1.0 });
+  for (const it of layout) {
+    // Share materials across character instances.
+    const inst = container.instantiateModelsToScene((n) => `${n}_${it.i}`, false);
+    const root = inst.rootNodes[0];
+    root.position = new BABYLON.Vector3(it.x, 0, it.z);
+    root.rotation = new BABYLON.Vector3(0, it.rotationY, 0);
+    for (const g of inst.animationGroups) {
+      // Offset animation phases across characters.
+      g.goToFrame((it.i % 24) / 24 * (g.to - g.from) + g.from);
+      // Explicitly stop the render-only baseline.
+      if (params.animate) g.play(true); else g.stop();
+    }
+    skinnedChars.push(root);
+  }
+  info.actual.skinned = skinnedChars.length;
+  info.actual.bonesPerChar = container.skeletons[0]?.bones.length ?? null;
+  info.actual.animChannels = srcGroup?.targetedAnimations.length ?? null;
+}
+
+// ---- overdraw ----
+// Full-screen transparent PBR layers isolate fragment and blending cost.
+const overdrawQuads = [];
+let overdrawRoot = null;
+let overdrawMaterial = null;
+if (params.coverage > 0) {
+  const od = buildOverdrawLayout(params.coverage, { aspect: CONTRACT.viewport.w / CONTRACT.viewport.h, fovDeg: CONTRACT.camera.fov });
+  // All engines load the same four 512x512 PBR textures.
+  const T = OVERDRAW_PBR_TEXTURES;
+  const mat = new BABYLON.PBRMaterial('odMat', scene);
+  mat.albedoTexture = new BABYLON.Texture(T.albedo, scene);
+  mat.bumpTexture = new BABYLON.Texture(T.normal, scene);
+  // Keep Babylon's own texture semantics while aligning texture count and coverage.
+  mat.metallicTexture = new BABYLON.Texture(T.metalness, scene);
+  mat.microSurfaceTexture = new BABYLON.Texture(T.roughness, scene);
+  mat.alpha = OVERDRAW_ALPHA;
+  mat.transparencyMode = BABYLON.Material.MATERIAL_ALPHABLEND;
+  overdrawMaterial = mat;
+  mat.alphaMode = BABYLON.Engine.ALPHA_COMBINE;
+  mat.disableDepthWrite = true;
+  mat.backFaceCulling = true;
+  // Hardware instancing keeps submission at one draw call.
+  const q0 = buildQuad(true);
+  const src = new BABYLON.Mesh('odSrc', scene);
+  {
+    const vd = new BABYLON.VertexData();
+    vd.positions = q0.positions; vd.normals = q0.normals;
+    vd.uvs = q0.uvs; vd.indices = q0.indices;
+    vd.applyToMesh(src);
+  }
+  src.material = mat;
+  overdrawRoot = new BABYLON.TransformNode('odRoot', scene);
+  overdrawRoot.parent = camera;
+  src.parent = overdrawRoot;
+  src.alwaysSelectAsActiveMesh = true;
+  od.items.forEach((q, i) => {
+    // The source mesh is layer zero; the remaining layers are instances.
+    const m = i === 0 ? src : src.createInstance('od' + q.i);
+    if (m !== src) {
+      m.parent = overdrawRoot;
+      m.alwaysSelectAsActiveMesh = true;
+    }
+    m.position = new BABYLON.Vector3(q.x, q.y, q.z);
+    m.scaling = new BABYLON.Vector3(q.sideW, q.sideH, 1);
+    m._od = q;
+    overdrawQuads.push(m);
+  });
+  info.actual.coverage = params.coverage;
+  info.actual.overdrawLayers = od.layers;
+  info.actual.overdrawQuads = od.quadCount;
+  info.actual.overdrawExpectedBlends = od.expectedPixelBlends;
+  info.actual.overdrawInstanced = true;
+  info.actual.overdrawAlpha = OVERDRAW_ALPHA;
+  info.actual.overdrawAlphaAnimated = false;
+  info.actual.overdrawMaterial = `PBRMaterial (4 PBR maps, normal alpha, alpha=${OVERDRAW_ALPHA})`;
+  info.actual.overdrawTextureInputs = 4;
+  info.actual.totalTriangles = od.quadCount * 2;
+  info.actual.vertexCountPerMesh = 4;
+}
+
+info.actual.objects = objects.length;
+info.actual.instances = objectCount;
+info.actual.lights = lights.length;
+info.actual.lightPolicy = `maxSimultaneousLights=${info.defaults.maxSimultaneousLights ?? 'n/a'}(default)`;
+info.defaults.parallelShaderCompile = !!engine.getCaps().parallelShaderCompile;
+info.defaults.useReverseDepthBuffer = engine.useReverseDepthBuffer;
+
+// ---- Shader warmup ----
+state.assetsLoaded = true;
+info.timings.assetsLoadedMs = performance.now();
+{
+  const c0 = cameraAt(0, params.bodies > 0 ? 'physics' : null);
+  camera.position.set(c0.x, c0.y, c0.z);
+  camera.setTarget(new BABYLON.Vector3(c0.tx, c0.ty, c0.tz));
+  // Keep rendering while asynchronous shader preparation settles.
+  await new Promise((resolve) => {
+    let settled = false;
+    scene.whenReadyAsync().then(() => { settled = true; resolve(); });
+    const pump = () => { if (settled) return; scene.render(); requestAnimationFrame(pump); };
+    requestAnimationFrame(pump);
+    // Prevent a single rung from hanging the batch.
+    setTimeout(() => { if (!settled) { settled = true; info.shaderWaitTimedOut = true; resolve(); } }, 30000);
+  });
+  state.shaderReady = true;
+  info.timings.shaderReadyMs = performance.now();
+}
+
+function engineTick(t, dt) {
+  // Keep camera and light inputs fixed during the PBR pixel case.
+  const sceneTime = params.coverage > 0 ? 0 : t;
+  const c = cameraAt(sceneTime, params.bodies > 0 ? 'physics' : null);
+  camera.position.set(c.x, c.y, c.z);
+  camera.setTarget(new BABYLON.Vector3(c.tx, c.ty, c.tz));
+
+  if (params.animate) {
+    for (const o of objects) {
+      const d = o._layout;
+      if (!d) continue;
+      o.rotation.y = d.rotationY + t * 0.0005;
+      o.position.y = d.y + Math.sin(t * 0.002 + d.phase) * 0.6;
+    }
+    if (params.coverage > 0 && overdrawQuads.length) {
+      for (const m of overdrawQuads) {
+        const q = m._od;
+        m.position.x = q.x + Math.sin(t * q.motionSpeedX + q.motionPhaseX) * q.motionAmpX;
+        m.position.y = q.y + Math.sin(t * q.motionSpeedY + q.motionPhaseY) * q.motionAmpY;
+      }
+    } else {
+      for (const l of lights) {
+        const d = l._layout;
+        const ang = t * 0.0003 + d.phase;
+        if (l.position) { l.position.x = Math.cos(ang) * d.orbit; l.position.z = Math.sin(ang) * d.orbit; }
+      }
+    }
+    // Layers translate but do not rotate, preserving full-screen coverage.
+    if (havokEnabled) {
+      physicsClock.advance(dt, (step) => scene._advancePhysicsEngineStep(step * 1000));
+    }
+  }
+  scene.render();
+}
+
+// Debug handles for manual inspection.
+window.__SCENE_REFS__ = { BABYLON, scene, engine, camera, physBodies };
+
+runLoop({
+  state, info, params, engineTick, gpuTimer,
+  onFinish() {
+    info.framebufferCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
+    if (overdrawMaterial) info.actual.overdrawActiveSamplers = inspectActiveSamplers(engine._gl);
+    if (overdrawMaterial) {
+      const alpha = overdrawMaterial.alpha;
+      const emissive = overdrawMaterial.emissiveColor.clone();
+      overdrawMaterial.alpha = 1;
+      overdrawMaterial.emissiveColor = BABYLON.Color3.White();
+      scene.render();
+      info.overdrawGeometryCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
+      overdrawMaterial.alpha = alpha;
+      overdrawMaterial.emissiveColor = emissive;
+      scene.render();
+    }
+    info.engineReported = {
+      drawCalls: engine._drawCalls ? engine._drawCalls.current : null,
+      activeMeshes: scene.getActiveMeshes().length,
+      totalVertices: scene.getTotalVertices(),
+      activeIndices: scene.getActiveIndices(),
+    };
+    if (physicsClock.totalSteps) info.actual.physSteps = physicsClock.totalSteps;
+    if (performance.memory) info.jsHeapMB = performance.memory.usedJSHeapSize / 1048576;
+    hud.textContent = `babylon done  ${info.frame.frameCount}f p95=${info.frame.p95?.toFixed(1)}ms`
+      + `\ndraw=${info.probe?.drawCalls} tri=${info.probe?.triangles}`;
+  },
+});
+hud.textContent = `babylon  case=${params.caseId} obj=${info.actual.objects} L=${lights.length}`;
+</script>
+</body>
+</html>

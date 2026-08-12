@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>H5 3D Engine Benchmark</title>
+<style>
+  :root { --bg:#0e1013; --panel:#171a1f; --line:#2b3038; --fg:#e6e8ea; --dim:#8b939c;
+          --three:#4ade80; --babylon:#38bdf8; --playcanvas:#fbbf24;
+          --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; background:var(--bg); color:var(--fg);
+              font:13px/1.5 -apple-system,"Helvetica Neue",Arial,sans-serif; }
+  body { display:flex; flex-direction:column; overflow:hidden; }
+
+  /* ---- Toolbar ---- */
+  .row { display:flex; align-items:center; gap:8px; padding:7px 12px;
+         background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .row > .lbl { color:var(--dim); font-size:10px; text-transform:uppercase;
+                letter-spacing:.06em; min-width:42px; }
+  .tg { display:flex; gap:3px; flex-wrap:wrap; }
+  .tg button { background:#1f242b; color:var(--dim); border:1px solid var(--line);
+               border-radius:4px; padding:4px 10px; font:inherit; font-size:12px;
+               cursor:pointer; white-space:nowrap; }
+  .tg button:hover { border-color:#4a525d; color:var(--fg); }
+  .tg button.on { background:#2563eb; border-color:#3b82f6; color:#fff; font-weight:600; }
+  #engTg button[data-e=three].on      { background:#166534; border-color:#22c55e; }
+  #engTg button[data-e=babylon].on    { background:#075985; border-color:#0ea5e9; }
+  #engTg button[data-e=playcanvas].on { background:#854d0e; border-color:#f59e0b; }
+  .spacer { flex:1; }
+  .sysnote { font-size:11px; color:var(--dim); }
+  .sysnote b { color:var(--warn); }
+
+  /* ---- Parameters ---- */
+  #params { padding:5px 12px; background:#12151a; border-bottom:1px solid var(--line);
+            font-size:11px; color:var(--dim); }
+  #params b { color:var(--fg); }
+
+  /* ---- HUD ---- */
+  #hud { display:flex; align-items:center; gap:0; background:#0b0d10;
+         border-bottom:1px solid var(--line); }
+  .m { padding:7px 16px; border-right:1px solid var(--line); min-width:108px; }
+  .m .k { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .m .v { font-size:19px; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.25; }
+  .m .u { font-size:11px; color:var(--dim); font-weight:400; }
+  #mEngine .v { font-size:15px; }
+  .m.wide { min-width:auto; flex:1; border-right:0; }
+  .m.wide .v { font-size:12px; font-weight:400; color:var(--dim); line-height:1.5; }
+
+  /* Render at native 1280x720. CSS scaling adds a GPU composition pass. */
+  main { flex:1; overflow:auto; background:#000; }
+  #wrap { position:relative; width:1280px; height:720px; }
+  #wrap iframe { width:1280px; height:720px; border:0; display:block; background:#000; }
+</style>
+</head>
+<body>
+
+<div id="caseRows"></div>
+
+<div class="row">
+  <span class="lbl">Load</span>
+  <div class="tg" id="rungTg"></div>
+  <span class="lbl" style="margin-left:14px">Engine</span>
+  <div class="tg" id="engTg">
+    <button data-e="three">three</button>
+    <button data-e="babylon">babylon</button>
+    <button data-e="playcanvas">playcanvas</button>
+  </div>
+  <span class="lbl" style="margin-left:14px">Frame cap</span>
+  <div class="tg" id="capTg">
+    <button data-cap="300" class="on">300fps</button>
+    <button data-cap="60">60fps</button>
+  </div>
+  <div class="spacer"></div>
+  <span class="sysnote" id="sysnote"></span>
+</div>
+
+<div id="params"></div>
+<div id="fitNote" style="padding:0 12px;font-size:11px;color:var(--warn)"></div>
+<div id="capNote" style="padding:3px 12px;font-size:11px;color:var(--dim);background:#12151a;border-bottom:1px solid var(--line)"></div>
+
+<div id="hud">
+  <div class="m" id="mEngine"><div class="k">Engine</div><div class="v">–</div></div>
+  <div class="m"><div class="k">Frame p50</div><div class="v"><span id="vP50">–</span><span class="u"> ms</span></div></div>
+  <div class="m"><div class="k">Frame p95</div><div class="v"><span id="vP95">–</span><span class="u"> ms</span></div></div>
+  <div class="m"><div class="k">GPU p95</div><div class="v"><span id="vGpu">–</span><span class="u"> ms</span></div></div>
+  <div class="m"><div class="k">FPS</div><div class="v" id="vFps">–</div></div>
+  <div class="m"><div class="k">Draw call</div><div class="v" id="vDraw">–</div></div>
+  <div class="m"><div class="k">Triangles/frame</div><div class="v" id="vTri">–</div></div>
+  <div class="m"><div class="k">Resolution</div><div class="v" id="vRes" style="font-size:14px">–</div></div>
+  <div class="m wide"><div class="k">Status</div><div class="v" id="vState">–</div></div>
+</div>
+
+<main><div id="wrap"></div></main>
+
+<script type="module">
+import { CASES, DEFAULTS, DOMAINS, DOMAIN_ORDER, casesInDomain } from '/spec/cases.js';
+import { CONTRACT } from '/spec/contract.js';
+
+const PAGES = { three: 'three.html', babylon: 'babylon.html', playcanvas: 'playcanvas.html' };
+const $ = (id) => document.getElementById(id);
+const wrap = $('wrap');
+
+const caseIds = Object.keys(CASES);
+// Render one row of case toggles per benchmark domain.
+const domains = DOMAIN_ORDER.filter(d => casesInDomain(d).length);
+let curCase = caseIds[0];
+let curRung = CASES[curCase].ladder[0];
+let curEngine = 'three';
+let curCap = CONTRACT.frameRateCap;
+let frame = null, timer = null;
+
+// ---------- Toolbar ----------
+function buildCaseToggles() {
+  const host = $('caseRows');
+  host.innerHTML = '';
+  for (const dom of domains) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl';
+    lbl.textContent = DOMAINS[dom].title;
+    lbl.title = DOMAINS[dom].note;
+    row.appendChild(lbl);
+    const tg = document.createElement('div');
+    tg.className = 'tg';
+    for (const id of casesInDomain(dom)) {
+      const b = document.createElement('button');
+      b.textContent = id;
+      b.dataset.c = id;
+      b.className = id === curCase ? 'on' : '';
+      b.title = CASES[id].note || '';
+      b.onclick = () => {
+        curCase = id;
+        curRung = CASES[id].ladder[0];
+        buildCaseToggles(); buildRungToggles(); showParams(); launch();
+      };
+      tg.appendChild(b);
+    }
+    row.appendChild(tg);
+    host.appendChild(row);
+  }
+}
+
+const fmtRung = (v) => v >= 1e6 ? (v / 1e6) + 'M' : v >= 1e3 ? (v / 1e3) + 'k' : String(v);
+
+function buildRungToggles() {
+  const c = CASES[curCase];
+  $('rungTg').innerHTML = '';
+  if (!c.axis) { $('rungTg').innerHTML = '<span class="sysnote">(no load levels)</span>'; return; }
+  for (const v of c.ladder) {
+    const b = document.createElement('button');
+    b.textContent = fmtRung(v);
+    b.className = v === curRung ? 'on' : '';
+    b.onclick = () => { curRung = v; buildRungToggles(); showParams(); launch(); };
+    $('rungTg').appendChild(b);
+  }
+}
+
+function buildCapToggles() {
+  for (const b of $('capTg').querySelectorAll('button')) {
+    const v = Number(b.dataset.cap);
+    b.className = v === curCap ? 'on' : '';
+    b.onclick = () => { curCap = v; buildCapToggles(); updateCapNote(); launch(); };
+  }
+}
+
+// The benchmark cap is 300 FPS. The 60 FPS option is for visual inspection only.
+function updateCapNote() {
+  $('capNote').innerHTML = curCap === CONTRACT.frameRateCap
+    ? `<b>Capped at ${CONTRACT.frameRateCap} FPS</b> for benchmark runs. Differences below about 3.33 ms are clipped by the cap.`
+    : '<b>Capped at 60 FPS</b> for visual inspection. Frame time is raised to about 16.6 ms.';
+}
+
+function buildEngineToggles() {
+  for (const b of $('engTg').querySelectorAll('button')) {
+    b.className = b.dataset.e === curEngine ? 'on' : '';
+    b.onclick = () => { curEngine = b.dataset.e; buildEngineToggles(); launch(); };
+  }
+}
+
+function currentParams() {
+  const c = CASES[curCase];
+  const p = { ...DEFAULTS, ...c.fixed };
+  if (c.axis) p[c.axis] = curRung;
+  return p;
+}
+
+function showParams() {
+  const c = CASES[curCase], p = currentParams();
+  const keys = ['objects', 'triangles', 'lights', 'coverage',
+                'skinned', 'bodies', 'animate'];
+  const shown = keys.filter(k => p[k]).map(k => `${k}=<b>${p[k]}</b>`);
+  const bits = [`<span style="opacity:.55">${DOMAINS[c.domain].title}</span>`];
+  if (shown.length) bits.push(shown.join(' · '));
+  $('params').innerHTML = bits.join(' ｜ ')
+    + (c.note ? `<span style="opacity:.65"> — ${c.note}</span>` : '');
+}
+
+// ---------- Launch ----------
+function launch() {
+  if (timer) { clearInterval(timer); timer = null; }
+  if (frame) frame.remove();
+  for (const k of ['vP50', 'vP95', 'vGpu', 'vFps', 'vDraw', 'vTri']) $(k).textContent = '–';
+  $('vState').textContent = 'Loading...';
+  $('mEngine').querySelector('.v').textContent = curEngine;
+  $('mEngine').querySelector('.v').style.color =
+    getComputedStyle(document.documentElement).getPropertyValue('--' + curEngine);
+
+  // Manual mode must run until the user switches cases, so it overrides
+  // collection-only warmup and duration limits.
+  const qs = new URLSearchParams({
+    ...currentParams(), case: curCase,
+    duration: 86400000,
+    maxDurationMs: 0,
+    maxWarmupMs: 0,
+    minSteadyFrames: 0,
+    fpsCap: curCap,
+  });
+  frame = document.createElement('iframe');
+  frame.src = `/${PAGES[curEngine]}?${qs}`;
+  wrap.appendChild(frame);
+  timer = setInterval(poll, 300);
+}
+
+function poll() {
+  let w; try { w = frame.contentWindow; } catch { return; }
+  if (!w) return;
+  const st = w.__HARNESS_STATE__, info = w.__HARNESS_INFO__, live = w.__LIVE__;
+  if (!st) { $('vState').textContent = 'Loading...'; return; }
+  if (st.error) { $('vState').innerHTML = `<span style="color:var(--bad)">Error: ${st.error}</span>`; return; }
+  if (!st.shaderReady) { $('vState').textContent = 'Compiling shaders...'; return; }
+
+  if (live?.p50 != null) {
+    $('vP50').textContent = live.p50.toFixed(1);
+    $('vP95').textContent = live.p95.toFixed(1);
+    // Color by the 60 FPS and 30 FPS budgets.
+    const c = live.p95 <= 16.6 ? 'var(--ok)' : (live.p95 <= 33.3 ? 'var(--warn)' : 'var(--bad)');
+    $('vP95').style.color = c;
+    $('vFps').textContent = live.fps.toFixed(0);
+    $('vFps').style.color = c;
+  }
+  if (live?.gpuP95 != null) {
+    $('vGpu').textContent = live.gpuP95.toFixed(1);
+    $('vGpu').style.color = live.gpuP95 <= 16.6
+      ? 'var(--ok)' : (live.gpuP95 <= 33.3 ? 'var(--warn)' : 'var(--bad)');
+  }
+  if (info?.probe) {
+    $('vDraw').textContent = info.probe.drawCalls?.toLocaleString() ?? '–';
+    $('vTri').textContent = info.probe.triangles?.toLocaleString() ?? '–';
+  }
+  if (info?.renderWidth) {
+    const ok = info.renderWidth === 1280 && info.renderHeight === 720;
+    $('vRes').textContent = `${info.renderWidth}×${info.renderHeight}`;
+    $('vRes').style.color = ok ? 'var(--ok)' : 'var(--bad)';
+  }
+  const bits = [];
+  if (info?.actual?.lightPolicy) bits.push(info.actual.lightPolicy);
+  if (info?.gpuFrame && !info.gpuFrame.supported) bits.push('GPU timer unavailable');
+  if (info?.framebufferCoverage != null) bits.push(`framebuffer coverage ${(info.framebufferCoverage * 100).toFixed(0)}%`);
+  if (live?.frames) bits.push(`${live.frames} frames`);
+  $('vState').textContent = bits.join(' · ') || 'Running';
+}
+
+// Warn when the native-size viewport needs horizontal scrolling.
+function fit() {
+  const main = document.querySelector('main');
+  const narrow = main.clientWidth < 1280;
+  $('fitNote').textContent = narrow
+    ? `Window width ${main.clientWidth}px is below 1280px; scroll horizontally to inspect the full frame`
+    : '';
+}
+window.addEventListener('resize', fit);
+
+// Vsync is controlled by browser launch flags, so detect and report rAF cadence.
+(function detectVsync() {
+  const t = []; let last = performance.now(), n = 0;
+  const loop = (now) => {
+    t.push(now - last); last = now;
+    if (++n < 90) requestAnimationFrame(loop);
+    else {
+      t.sort((a, b) => a - b);
+      const med = t[Math.floor(t.length / 2)];
+      const hz = Math.round(1000 / med);
+      const capped = med > 1.5;
+      $('sysnote').innerHTML = capped
+        ? `<b>Vsync appears enabled</b> (rAF ≈${hz} Hz). Frame time is capped near ${med.toFixed(1)} ms. Launch with <code>node runner/open-bench.mjs</code> to disable it.`
+        : `Vsync disabled (rAF ≈${hz} Hz) · benchmark loop capped at ${CONTRACT.frameRateCap} FPS`;
+    }
+  };
+  requestAnimationFrame(loop);
+})();
+
+buildCaseToggles(); buildRungToggles(); buildEngineToggles(); buildCapToggles();
+showParams(); updateCapNote(); fit(); launch();
+</script>
+</body>
+</html>

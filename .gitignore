@@ -1,0 +1,5 @@
+node_modules/
+results/*
+!results/.gitkeep
+.DS_Store
+*.log

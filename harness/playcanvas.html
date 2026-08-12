@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>playcanvas harness</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#05060a; }
+  canvas { display:block; }
+  #hud { position:fixed; top:8px; left:8px; color:#ff0; font:12px monospace; z-index:10; white-space:pre; }
+</style>
+<script type="importmap">
+{ "imports": { "playcanvas": "/vendor/playcanvas/build/playcanvas.mjs" } }
+</script>
+</head>
+<body>
+<div id="hud">playcanvas booting…</div>
+<canvas id="c"></canvas>
+<script type="module">
+import '/harness/common/probe.js';
+import { createHarness, createFixedStepClock, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
+import { cameraAt } from '/spec/contract.js';
+import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildPhysicsLayout } from '/spec/scene-spec.js';
+import * as pc from 'playcanvas';
+
+const params = readParams();
+const { state, info } = createHarness('playcanvas');
+info.engineVersion = pc.version;
+info.gpu = detectGpu();
+info.requested = { ...params };
+const hud = document.getElementById('hud');
+
+const canvas = document.getElementById('c');
+canvas.width = CONTRACT.viewport.w; canvas.height = CONTRACT.viewport.h;
+canvas.style.width = CONTRACT.viewport.w + 'px';
+canvas.style.height = CONTRACT.viewport.h + 'px';
+
+// ---- Engine initialization ----
+// Application registers the complete component system. All three resolution
+// controls are required to keep the backbuffer at the contract size.
+const device = await pc.createGraphicsDevice(canvas, {
+  deviceTypes: [pc.DEVICETYPE_WEBGL2],
+  antialias: CONTRACT.antialias,
+});
+const gpuTimer = params.coverage > 0 ? createGpuTimer(device.gl) : null;
+device.maxPixelRatio = CONTRACT.devicePixelRatio;
+const app = new pc.Application(canvas, { graphicsDevice: device });
+app.setCanvasFillMode(pc.FILLMODE_NONE);
+app.setCanvasResolution(pc.RESOLUTION_FIXED, CONTRACT.viewport.w, CONTRACT.viewport.h);
+app.autoRender = false;
+
+info.renderWidth = device.width;
+info.renderHeight = device.height;
+
+// Record defaults without changing them.
+info.defaults = {
+  clusteredLightingEnabled: app.scene.clusteredLightingEnabled,
+  lightingCells: app.scene.lighting.cells ? app.scene.lighting.cells.toString() : null,
+  maxLightsPerCell: app.scene.lighting.maxLightsPerCell,
+  toneMapping: app.scene.rendering?.toneMapping ?? null,
+  exposure: app.scene.exposure,
+};
+
+const cc = CONTRACT.clearColor;
+const camEnt = new pc.Entity('cam');
+camEnt.addComponent('camera', {
+  fov: CONTRACT.camera.fov,
+  nearClip: CONTRACT.camera.near,
+  farClip: CONTRACT.camera.far,
+  clearColor: new pc.Color(cc.r, cc.g, cc.b, cc.a),
+});
+app.root.addChild(camEnt);
+
+// ---- Shared directional light ----
+{
+  const A = CONTRACT.baseLight;
+  const intensity = params.coverage > 0 ? A.pbrPixelIntensity : A.intensity;
+  const base = new pc.Entity('baseLight');
+  base.addComponent('light', {
+    type: 'directional',
+    color: new pc.Color(A.color.r, A.color.g, A.color.b),
+    intensity,
+  });
+  // PlayCanvas directional lights point along the entity's negative Z axis.
+  const d = A.direction;
+  base.setPosition(-d.x * 50, -d.y * 50, -d.z * 50);
+  base.lookAt(0, 0, 0);
+  app.root.addChild(base);
+  info.actual.baseLight = 'DirectionalLight intensity=' + intensity;
+}
+
+// ---- Lights ----
+const lights = [];
+for (const L of buildLightLayout(params.lights)) {
+  const ent = new pc.Entity('light' + L.i);
+  ent.addComponent('light', {
+    type: 'omni', color: new pc.Color(L.r, L.g, L.b), intensity: L.intensity,
+    range: L.range,
+  });
+  ent.setPosition(L.x, L.y, L.z);
+  ent._layout = L;
+  app.root.addChild(ent);
+  lights.push(ent);
+}
+
+// ---- Objects ----
+const objects = [];
+const objectCount = params.objects;
+if (objectCount > 0) {
+  const seg = segForTriangles(params.triangles, objectCount);
+  const grid = buildGrid(seg);
+  const mesh = new pc.Mesh(app.graphicsDevice);
+  mesh.clear(false, false);
+  mesh.setPositions(grid.positions);
+  mesh.setNormals(grid.normals);
+  mesh.setUvs(0, grid.uvs);
+  mesh.setIndices(grid.indices);
+  mesh.update(pc.PRIMITIVE_TRIANGLES);
+
+  const mat = new pc.StandardMaterial();
+  mat.diffuse = new pc.Color(0.69, 0.74, 0.78);
+  mat.update();
+  const layout = buildObjectLayout(objectCount);
+
+  for (const it of layout) {
+    const mi = new pc.MeshInstance(mesh, mat);
+    const ent = new pc.Entity('obj' + it.i);
+    ent.addComponent('render', { meshInstances: [mi] });
+    ent.setLocalPosition(it.x, it.y, it.z);
+    ent.setLocalEulerAngles(0, it.rotationY * 180 / Math.PI, 0);
+    ent.setLocalScale(it.scale, it.scale, it.scale);
+    ent._layout = it;
+    app.root.addChild(ent);
+    objects.push(ent);
+  }
+  info.actual.triangleCountPerMesh = grid.triangleCount;
+  info.actual.seg = seg;
+  info.actual.totalTriangles = grid.triangleCount * objectCount;
+  info.actual.vertexCountPerMesh = grid.vertexCount;
+}
+
+// ---- Physics: Ammo ----
+const physBodies = [];
+const PHYS_DT = 1 / 60;
+const physicsClock = createFixedStepClock({ stepSeconds: PHYS_DT });
+if (params.bodies > 0) {
+  // PlayCanvas rigidbody requires an Ammo build that exports addFunction.
+  await new Promise((resolve, reject) => {
+    const sc = document.createElement('script');
+    sc.src = '/assets/ammo.wasm.js';
+    sc.onload = resolve; sc.onerror = reject;
+    document.head.appendChild(sc);
+  });
+  window.Ammo = await window.Ammo({
+    locateFile: (f) => f.endsWith('.wasm') ? '/assets/ammo.wasm.wasm' : f,
+  });
+  if (typeof window.Ammo.addFunction !== 'function') {
+    throw new Error('Ammo does not export addFunction; PlayCanvas rigidbody cannot initialize');
+  }
+  // Manual loading bypasses WasmModule, so notify the rigidbody system directly.
+  app.systems.rigidbody.onLibraryLoaded();
+  if (!app.systems.rigidbody.physicsWorld) {
+    throw new Error('PlayCanvas physicsWorld initialization failed');
+  }
+  info.actual.physicsEngine = 'Ammo.js (WASM build)';
+
+  const L = buildPhysicsLayout(params.bodies);
+  const gSize = L.groundSize;
+
+  const gMesh = pc.createBox(app.graphicsDevice, { halfExtents: new pc.Vec3(gSize/2, 0.5, gSize/2) });
+  const gMat = new pc.StandardMaterial();
+  gMat.diffuse = new pc.Color(0.10, 0.11, 0.14); gMat.update();
+  const ground = new pc.Entity('pground');
+  ground.addComponent('render', { meshInstances: [new pc.MeshInstance(gMesh, gMat)] });
+  ground.setLocalPosition(0, -0.5, 0);
+  app.root.addChild(ground);
+  ground.addComponent('collision', { type: 'box', halfExtents: new pc.Vec3(gSize/2, 0.5, gSize/2) });
+  ground.addComponent('rigidbody', { type: 'static' });
+
+  // Share mesh and material; dynamic rigid bodies remain separate entities.
+  const bMesh = pc.createBox(app.graphicsDevice, { halfExtents: new pc.Vec3(L.size/2, L.size/2, L.size/2) });
+  const bMat = new pc.StandardMaterial();
+  bMat.diffuse = new pc.Color(0.75, 0.50, 0.31); bMat.update();
+  for (const it of L.items) {
+    const e = new pc.Entity('pb' + it.i);
+    e.addComponent('render', { meshInstances: [new pc.MeshInstance(bMesh, bMat)] });
+    e.setLocalPosition(it.x, it.y, it.z);
+    // Add to the hierarchy before components so onEnable creates the native body.
+    app.root.addChild(e);
+    e.addComponent('collision', { type: 'box', halfExtents: new pc.Vec3(L.size/2, L.size/2, L.size/2) });
+    e.addComponent('rigidbody', { type: 'dynamic', mass: it.mass });
+    e.rigidbody.linearVelocity = new pc.Vec3(it.vx, 0, it.vz);
+    physBodies.push(e);
+  }
+  info.actual.bodies = physBodies.length;
+  info.actual.physFixedStep = PHYS_DT;
+  // Replace automatic updates with the shared fixed-step clock.
+  app.systems.off('update', app.systems.rigidbody.onUpdate, app.systems.rigidbody);
+}
+
+// ---- Skeletal animation ----
+const skinnedChars = [];
+if (params.skinned > 0) {
+  const asset = await new Promise((resolve, reject) => {
+    app.assets.loadFromUrl('/assets/' + params.model, 'container', (err, a) => err ? reject(err) : resolve(a));
+  });
+  const animAsset = asset.resource.animations[0];
+  const layout = buildObjectLayout(params.skinned, { scale: 1.0 });
+  for (const it of layout) {
+    const ent = asset.resource.instantiateRenderEntity();
+    ent.setLocalPosition(it.x, 0, it.z);
+    ent.setLocalEulerAngles(0, it.rotationY * 180 / Math.PI, 0);
+    ent.addComponent('anim', { activate: !!params.animate });
+    app.root.addChild(ent);
+    ent.anim.assignAnimation('wiggle', animAsset.resource);
+    // Offset animation phases across characters.
+    if (ent.anim.baseLayer) ent.anim.baseLayer.activeStateCurrentTime = (it.i % 24) / 24 * 2.0;
+    // Freeze the render-only baseline.
+    if (!params.animate) ent.anim.playing = false;
+    skinnedChars.push(ent);
+  }
+  info.actual.skinned = skinnedChars.length;
+  const rc = skinnedChars[0]?.findComponent?.('render');
+  info.actual.bonesPerChar = rc?.meshInstances?.[0]?.skinInstance?.bones?.length ?? null;
+  info.actual.animChannels = animAsset?.resource?._curves?.length ?? null;
+}
+
+// ---- overdraw ----
+// Full-screen transparent PBR layers isolate fragment and blending cost.
+let overdrawLayout = null;
+let overdrawInstanceData = null;
+let overdrawInstanceBuffer = null;
+let overdrawMaterial = null;
+const overdrawMatrix = new pc.Mat4();
+const overdrawRotation = new pc.Quat();
+const overdrawPosition = new pc.Vec3();
+const overdrawScale = new pc.Vec3();
+
+if (params.coverage > 0) {
+  const od = buildOverdrawLayout(params.coverage, { aspect: CONTRACT.viewport.w / CONTRACT.viewport.h, fovDeg: CONTRACT.camera.fov });
+  overdrawLayout = od.items;
+  // Use shared quad geometry; pc.createPlane has a different default tessellation.
+  const q0 = buildQuad();
+  const quadMesh = new pc.Mesh(app.graphicsDevice);
+  quadMesh.clear(false, false);
+  quadMesh.setPositions(q0.positions);
+  quadMesh.setNormals(q0.normals);
+  quadMesh.setUvs(0, q0.uvs);
+  quadMesh.setIndices(q0.indices);
+  quadMesh.update(pc.PRIMITIVE_TRIANGLES);
+  // All engines load the same four 512x512 PBR textures.
+  const T = OVERDRAW_PBR_TEXTURES;
+  // Use the asset system so texture upload is complete before measurement.
+  const loadTex = async (url) => {
+    const asset = new pc.Asset(url, 'texture', { url });
+    app.assets.add(asset);
+    await new Promise((resolve, reject) => {
+      asset.ready(() => resolve());
+      asset.on('error', reject);
+      app.assets.load(asset);
+    });
+    return asset.resource;
+  };
+  const [texAlbedo, texNormal, texRough, texMetal] = await Promise.all([
+    loadTex(T.albedo), loadTex(T.normal), loadTex(T.roughness), loadTex(T.metalness),
+  ]);
+  const mat = new pc.StandardMaterial();
+  mat.diffuseMap = texAlbedo;
+  mat.normalMap = texNormal;
+  mat.glossMap = texRough;
+  mat.glossInvert = true;
+  mat.metalnessMap = texMetal;
+  mat.useMetalness = true;
+  mat.opacity = OVERDRAW_ALPHA;
+  mat.blendType = pc.BLEND_NORMAL;
+  mat.depthWrite = false;
+  mat.cull = pc.CULLFACE_BACK;
+  mat.update();
+  overdrawMaterial = mat;
+  // Hardware instancing keeps submission at one draw call.
+  const mi = new pc.MeshInstance(quadMesh, mat);
+  {
+    const data = new Float32Array(od.items.length * 16);
+    overdrawInstanceData = data;
+    const m4 = new pc.Mat4();
+    const noRot = new pc.Quat();
+    od.items.forEach((q, i) => {
+      m4.setTRS(new pc.Vec3(q.x, q.y, q.z), noRot, new pc.Vec3(q.sideW, q.sideH, 1));
+      data.set(m4.data, i * 16);
+    });
+    const format = pc.VertexFormat.getDefaultInstancingFormat(app.graphicsDevice);
+    const vb = new pc.VertexBuffer(app.graphicsDevice, format, od.items.length, {
+      data,
+      usage: pc.BUFFER_DYNAMIC,
+    });
+    overdrawInstanceBuffer = vb;
+    mi.setInstancing(vb);
+    mi.instancingCount = od.items.length;
+  }
+  mi.cull = false;
+  const ent = new pc.Entity('odInst');
+  ent.addComponent('render', { meshInstances: [mi] });
+  camEnt.addChild(ent);
+  info.actual.coverage = params.coverage;
+  info.actual.overdrawLayers = od.layers;
+  info.actual.overdrawQuads = od.quadCount;
+  info.actual.overdrawExpectedBlends = od.expectedPixelBlends;
+  info.actual.overdrawInstanced = true;
+  info.actual.overdrawAlpha = OVERDRAW_ALPHA;
+  info.actual.overdrawAlphaAnimated = false;
+  info.actual.overdrawMaterial = `StandardMaterial (4 PBR maps, opacity=${OVERDRAW_ALPHA})`;
+  info.actual.overdrawSpecularModel = 'PlayCanvas default';
+  info.actual.overdrawTextureInputs = 4;
+  info.actual.totalTriangles = od.quadCount * 2;
+  info.actual.vertexCountPerMesh = 4;
+}
+
+info.actual.objects = objects.length;
+info.actual.instances = objectCount;
+info.actual.lights = lights.length;
+info.actual.lightPolicy = info.defaults.clusteredLightingEnabled
+  ? `clustered(maxLightsPerCell=${info.defaults.maxLightsPerCell})`
+  : 'forward';
+
+// ---- Start and shader warmup ----
+// Cancel Application's scheduled tick so only the shared harness loop renders.
+app.start();
+if (app.frameRequestId) {
+  cancelAnimationFrame(app.frameRequestId);
+  app.frameRequestId = null;
+}
+info.defaults.internalTickCancelled = true;
+state.assetsLoaded = true;
+info.timings.assetsLoadedMs = performance.now();
+{
+  const c0 = cameraAt(0, params.bodies > 0 ? 'physics' : null);
+  camEnt.setPosition(c0.x, c0.y, c0.z);
+  camEnt.lookAt(c0.tx, c0.ty, c0.tz);
+  // PlayCanvas has no explicit compile API, so render several warmup frames.
+  await new Promise((resolve) => {
+    let n = 0;
+    const pump = () => {
+      app.renderNextFrame = true;
+      app.update(1 / 60);
+      app.render();
+      if (++n < 10) requestAnimationFrame(pump);
+      else resolve();
+    };
+    requestAnimationFrame(pump);
+  });
+  state.shaderReady = true;
+  info.timings.shaderReadyMs = performance.now();
+}
+
+function engineTick(t, dt) {
+  // Keep camera and light inputs fixed during the PBR pixel case.
+  const sceneTime = params.coverage > 0 ? 0 : t;
+  const c = cameraAt(sceneTime, params.bodies > 0 ? 'physics' : null);
+  camEnt.setPosition(c.x, c.y, c.z);
+  camEnt.lookAt(c.tx, c.ty, c.tz);
+
+  if (params.animate) {
+    for (const o of objects) {
+      const d = o._layout;
+      o.setLocalEulerAngles(0, (d.rotationY + t * 0.0005) * 180 / Math.PI, 0);
+      o.setLocalPosition(d.x, d.y + Math.sin(t * 0.002 + d.phase) * 0.6, d.z);
+    }
+    if (params.coverage > 0 && overdrawInstanceBuffer) {
+      overdrawLayout.forEach((q, i) => {
+        const x = q.x + Math.sin(t * q.motionSpeedX + q.motionPhaseX) * q.motionAmpX;
+        const y = q.y + Math.sin(t * q.motionSpeedY + q.motionPhaseY) * q.motionAmpY;
+        overdrawPosition.set(x, y, q.z);
+        overdrawScale.set(q.sideW, q.sideH, 1);
+        overdrawMatrix.setTRS(overdrawPosition, overdrawRotation, overdrawScale);
+        overdrawInstanceData.set(overdrawMatrix.data, i * 16);
+      });
+      overdrawInstanceBuffer.setData(overdrawInstanceData);
+    } else {
+      for (const l of lights) {
+        const d = l._layout;
+        const ang = t * 0.0003 + d.phase;
+        const p = l.getPosition();
+        l.setPosition(Math.cos(ang) * d.orbit, p.y, Math.sin(ang) * d.orbit);
+      }
+    }
+    // Layers translate but do not rotate, preserving full-screen coverage.
+  }
+  app.renderNextFrame = true;
+  app.update(1 / 60);
+  if (params.animate && physBodies.length) {
+    physicsClock.advance(dt, (step) => app.systems.rigidbody.onUpdate(step));
+  }
+  app.render();
+}
+
+// Debug handles for manual inspection.
+window.__SCENE_REFS__ = { pc, app, camEnt, physBodies };
+
+runLoop({
+  state, info, params, engineTick, gpuTimer,
+  onFinish() {
+    info.framebufferCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
+    if (overdrawMaterial) info.actual.overdrawActiveSamplers = inspectActiveSamplers(device.gl);
+    if (overdrawMaterial) {
+      const opacity = overdrawMaterial.opacity;
+      const emissive = overdrawMaterial.emissive.clone();
+      overdrawMaterial.opacity = 1;
+      overdrawMaterial.emissive = new pc.Color(1, 1, 1);
+      overdrawMaterial.update();
+      app.renderNextFrame = true;
+      app.render();
+      info.overdrawGeometryCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
+      overdrawMaterial.opacity = opacity;
+      overdrawMaterial.emissive = emissive;
+      overdrawMaterial.update();
+      app.renderNextFrame = true;
+      app.render();
+    }
+    const st = app.stats;
+    info.engineReported = {
+      // Release builds may omit these values; the gate uses the WebGL probe.
+      drawCalls: st?.frame?.drawCalls ?? null,
+      triangles: st?.frame?.triangles ?? null,
+      shaders: st?.frame?.shaders ?? null,
+    };
+    if (physicsClock.totalSteps) info.actual.physSteps = physicsClock.totalSteps;
+    if (performance.memory) info.jsHeapMB = performance.memory.usedJSHeapSize / 1048576;
+    hud.textContent = `playcanvas done  ${info.frame.frameCount}f p95=${info.frame.p95?.toFixed(1)}ms`
+      + `\ndraw=${info.probe?.drawCalls} tri=${info.probe?.triangles}`;
+  },
+});
+hud.textContent = `playcanvas  case=${params.caseId} obj=${info.actual.objects} L=${lights.length}`;
+</script>
+</body>
+</html>

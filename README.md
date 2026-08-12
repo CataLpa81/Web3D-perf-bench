@@ -1,0 +1,87 @@
+# H5 3D Engine Benchmark
+
+A reproducible comparison of the default behavior of
+[three.js](https://threejs.org/), [Babylon.js](https://www.babylonjs.com/), and
+[PlayCanvas](https://playcanvas.com/).
+
+The benchmark uses common game workloads without engine-specific optimization. Scene inputs are aligned, while
+each engine keeps its default lighting, material, culling, color, and object-management behavior.
+
+Read the current interpretation of the results in **[CONCLUSION.md](./CONCLUSION.md)**.
+
+## Test Cases
+
+| Case | Workload | Metric |
+|---|---|---|
+| `empty` | Engine and render-loop baseline | CPU p95 |
+| `lights` | 4–64 dynamic point lights | CPU p95 |
+| `drawcalls` | 500–10,000 individual meshes | CPU p95 |
+| `overdraw-pbr` | 8–128 full-screen transparent PBR layers | GPU p95 |
+| `skinned` | 100–1,200 animated characters | CPU p95 |
+| `physics` | 500–10,000 dynamic rigid bodies | CPU p95 |
+
+## Run a Benchmark
+
+Requirements: Node.js 20+, WebGL 2, and a real GPU on macOS, Linux, or Windows.
+
+```bash
+npm ci
+npx playwright install chromium
+
+# Short run for inspecting trends
+npm run collect:quick
+```
+
+The command runs all cases against all three engines and automatically creates:
+
+- `raw-results.json`: environment, records, gates, and capacities
+- `screenshots/`: one capture for each engine and test point
+- `report.html`: self-contained HTML summary
+
+Files are written to a timestamped directory under `results/`. Open its `report.html` directly in a browser.
+
+```bash
+# Regenerate a report when needed
+npm run report -- <batchId>
+```
+
+Useful filters:
+
+```bash
+node runner/collect.mjs --case=lights,drawcalls
+node runner/collect.mjs --domain=render
+node runner/collect.mjs --engine=three
+node runner/collect.mjs --case=empty --headed
+```
+
+Each point uses one 3-second sample and may run longer when a heavy workload needs more samples.
+
+## Manual Inspection
+
+```bash
+npm run bench
+```
+
+This opens the test bench in Chromium with vsync disabled and a 300 FPS ceiling. Use it to inspect scene
+construction and engine behavior; automated collection should be used for recorded results.
+
+## Method
+
+- Canvas: 1280×720, DPR 1, antialiasing enabled.
+- Every test point receives a fresh page, WebGL context, and engine instance.
+- Seeded layouts and shared geometry make scene inputs verifiable.
+- A blocking parity gate rejects software rendering, unequal inputs, blank output, and invalid samples.
+- Draw calls and triangles are measured at the WebGL API instead of using engine statistics.
+- The PBR pixel test uses `EXT_disjoint_timer_query_webgl2` and is excluded from capacity rankings because the
+  default materials provide different features and output quality.
+- Physics compares complete stacks: three.js + Rapier, Babylon.js + Havok, and PlayCanvas + Ammo.
+
+The benchmark matrix is defined in [`spec/cases.js`](./spec/cases.js), and shared constraints are defined in
+[`spec/contract.js`](./spec/contract.js).
+
+Run `npm run check` before contributing.
+
+## License
+
+See [`harness/assets/CREDITS.md`](./harness/assets/CREDITS.md) for third-party assets and licenses.
+Project code is available under the [MIT License](./LICENSE).

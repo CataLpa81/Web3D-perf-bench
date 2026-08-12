@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>three.js harness</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#05060a; }
+  canvas { display:block; }
+  #hud { position:fixed; top:8px; left:8px; color:#0f0; font:12px monospace; z-index:10; white-space:pre; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "/vendor/three/build/three.module.js",
+  "three/addons/": "/vendor/three/examples/jsm/",
+  "@dimforge/rapier3d-compat": "/vendor/@dimforge/rapier3d-compat/dist/rapier.mjs"
+} }
+</script>
+</head>
+<body>
+<div id="hud">three booting…</div>
+<canvas id="c"></canvas>
+<script type="module">
+// Install the WebGL probe before the engine acquires a context.
+import '/harness/common/probe.js';
+import { createHarness, createFixedStepClock, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
+import { cameraAt } from '/spec/contract.js';
+import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildPhysicsLayout } from '/spec/scene-spec.js';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+
+const params = readParams();
+const { state, info } = createHarness('three');
+info.engineVersion = THREE.REVISION;
+info.gpu = detectGpu();
+info.requested = { ...params };
+const hud = document.getElementById('hud');
+
+const canvas = document.getElementById('c');
+canvas.width = CONTRACT.viewport.w; canvas.height = CONTRACT.viewport.h;
+canvas.style.width = CONTRACT.viewport.w + 'px';
+canvas.style.height = CONTRACT.viewport.h + 'px';
+
+// ---- Engine initialization ----
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: CONTRACT.antialias });
+renderer.setPixelRatio(CONTRACT.devicePixelRatio);
+renderer.setSize(CONTRACT.viewport.w, CONTRACT.viewport.h, false);
+const gpuTimer = params.coverage > 0 ? createGpuTimer(renderer.getContext()) : null;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(CONTRACT.clearColor.r, CONTRACT.clearColor.g, CONTRACT.clearColor.b);
+const camera = new THREE.PerspectiveCamera(
+  CONTRACT.camera.fov, CONTRACT.viewport.w / CONTRACT.viewport.h, CONTRACT.camera.near, CONTRACT.camera.far);
+
+// Record defaults without changing them.
+info.defaults = {
+  toneMapping: renderer.toneMapping,
+  outputColorSpace: renderer.outputColorSpace,
+  useLegacyLights: renderer.useLegacyLights ?? null,
+};
+{
+  const gl = renderer.getContext();
+  info.renderWidth = gl.drawingBufferWidth;
+  info.renderHeight = gl.drawingBufferHeight;
+}
+
+// ---- Shared directional light ----
+{
+  const A = CONTRACT.baseLight;
+  const intensity = params.coverage > 0 ? A.pbrPixelIntensity : A.intensity;
+  const base = new THREE.DirectionalLight(new THREE.Color(A.color.r, A.color.g, A.color.b), intensity);
+  // DirectionalLight points from position to its target at the origin.
+  base.position.set(-A.direction.x * 50, -A.direction.y * 50, -A.direction.z * 50);
+  scene.add(base);
+  info.actual.baseLight = 'DirectionalLight intensity=' + intensity;
+}
+
+// ---- Lights ----
+const lights = [];
+for (const L of buildLightLayout(params.lights)) {
+  const light = new THREE.PointLight(new THREE.Color(L.r, L.g, L.b), L.intensity, L.range, 2);
+  light.position.set(L.x, L.y, L.z);
+  light.userData = L;
+  scene.add(light);
+  lights.push(light);
+}
+
+// ---- Objects ----
+const objects = [];
+let sharedGeo = null;
+const objectCount = params.objects;
+if (objectCount > 0) {
+  const seg = segForTriangles(params.triangles, objectCount);
+  const grid = buildGrid(seg);
+  sharedGeo = new THREE.BufferGeometry();
+  sharedGeo.setAttribute('position', new THREE.BufferAttribute(grid.positions, 3));
+  sharedGeo.setAttribute('normal', new THREE.BufferAttribute(grid.normals, 3));
+  sharedGeo.setAttribute('uv', new THREE.BufferAttribute(grid.uvs, 2));
+  sharedGeo.setIndex(new THREE.BufferAttribute(grid.indices, 1));
+  const mat = new THREE.MeshStandardMaterial({ color: 0xb0bcc8 });
+  const layout = buildObjectLayout(objectCount);
+
+  for (const it of layout) {
+    const mesh = new THREE.Mesh(sharedGeo, mat);
+    mesh.position.set(it.x, it.y, it.z);
+    mesh.rotation.y = it.rotationY;
+    mesh.scale.setScalar(it.scale);
+    mesh.userData = it;
+    scene.add(mesh);
+    objects.push(mesh);
+  }
+  info.actual.triangleCountPerMesh = grid.triangleCount;
+  info.actual.seg = seg;
+  info.actual.totalTriangles = grid.triangleCount * objectCount;
+  info.actual.vertexCountPerMesh = grid.vertexCount;
+}
+
+// ---- Physics: Rapier ----
+const physBodies = [];
+let rapierWorld = null;
+const PHYS_DT = 1 / 60;
+const physicsClock = createFixedStepClock({ stepSeconds: PHYS_DT });
+let physInstMesh = null;
+const physMat = new THREE.Matrix4(), physQuat = new THREE.Quaternion();
+const physVec = new THREE.Vector3(), physScale = new THREE.Vector3(1, 1, 1);
+if (params.bodies > 0) {
+  const RAPIER = await import('@dimforge/rapier3d-compat');
+  await RAPIER.init();
+  const L = buildPhysicsLayout(params.bodies);
+  // The render-only baseline creates the world but does not step it.
+  rapierWorld = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+  rapierWorld.timestep = 1 / 60;
+
+  const gSize = L.groundSize;
+  rapierWorld.createCollider(RAPIER.ColliderDesc.cuboid(gSize / 2, 0.5, gSize / 2)
+    .setTranslation(0, -0.5, 0));
+  const ground = new THREE.Mesh(
+    new THREE.BoxGeometry(gSize, 1, gSize),
+    new THREE.MeshStandardMaterial({ color: 0x1a1d24 }));
+  ground.position.y = -0.5;
+  scene.add(ground);
+
+  // Keep physics rendering lightweight with one instanced draw.
+  const geo = new THREE.BoxGeometry(L.size, L.size, L.size);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xc08050 });
+  const h = L.size / 2;
+  physInstMesh = new THREE.InstancedMesh(geo, mat, L.items.length);
+  physInstMesh.frustumCulled = false;
+  scene.add(physInstMesh);
+  for (const it of L.items) {
+    const body = rapierWorld.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(it.x, it.y, it.z)
+        .setLinvel(it.vx, 0, it.vz));
+    rapierWorld.createCollider(RAPIER.ColliderDesc.cuboid(h, h, h), body);
+    physBodies.push({ body, idx: physBodies.length });
+  }
+  info.actual.bodies = physBodies.length;
+  info.actual.physicsEngine = 'Rapier ' + (RAPIER.version?.() ?? '');
+  info.actual.physFixedStep = PHYS_DT;
+}
+
+// ---- Skeletal animation ----
+// SkeletonUtils.clone preserves an independent skeleton per character.
+const skinnedChars = [];
+let mixers = [];
+if (params.skinned > 0) {
+  const gltf = await new GLTFLoader().loadAsync('/assets/' + params.model);
+  const layout = buildObjectLayout(params.skinned, { scale: 1.0 });
+  for (const it of layout) {
+    const root = cloneSkeleton(gltf.scene);
+    root.position.set(it.x, 0, it.z);
+    root.rotation.y = it.rotationY;
+    scene.add(root);
+    const mixer = new THREE.AnimationMixer(root);
+    const action = mixer.clipAction(gltf.animations[0]);
+    // Offset animation phases across characters.
+    action.time = (it.i % 24) / 24 * gltf.animations[0].duration;
+    action.play();
+    mixers.push(mixer);
+    skinnedChars.push(root);
+  }
+  info.actual.skinned = skinnedChars.length;
+  info.actual.bonesPerChar = gltf.scene.getObjectByProperty('isSkinnedMesh', true)?.skeleton?.bones?.length ?? null;
+  info.actual.animChannels = gltf.animations[0].tracks.length;
+}
+
+// ---- overdraw ----
+// Full-screen transparent PBR layers isolate fragment and blending cost.
+let overdrawGroup = null;
+let overdrawLayout = null;
+let overdrawInstancedMesh = null;
+let overdrawMaterial = null;
+const overdrawMatrix = new THREE.Matrix4();
+if (params.coverage > 0) {
+  const od = buildOverdrawLayout(params.coverage, { aspect: CONTRACT.viewport.w / CONTRACT.viewport.h, fovDeg: CONTRACT.camera.fov });
+  overdrawLayout = od.items;
+  // Use shared quad geometry rather than engine-specific primitives.
+  const q0 = buildQuad();
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(q0.positions, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(q0.normals, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(q0.uvs, 2));
+  geo.setIndex(new THREE.BufferAttribute(q0.indices, 1));
+  // All engines load the same four 512x512 PBR textures.
+  const T = OVERDRAW_PBR_TEXTURES;
+  const loader = new THREE.TextureLoader();
+  const [map, normalMap, roughnessMap, metalnessMap] = await Promise.all([
+    loader.loadAsync(T.albedo),
+    loader.loadAsync(T.normal),
+    loader.loadAsync(T.roughness),
+    loader.loadAsync(T.metalness),
+  ]);
+  // Keep the default FrontSide path; DoubleSide adds a second pass.
+  const mat = new THREE.MeshStandardMaterial({
+    map, normalMap, roughnessMap, metalnessMap,
+    transparent: true, opacity: OVERDRAW_ALPHA,
+    blending: THREE.NormalBlending, depthWrite: false,
+  });
+  overdrawMaterial = mat;
+  // Hardware instancing keeps submission at one draw call.
+  overdrawGroup = new THREE.Group();
+  camera.add(overdrawGroup);
+  scene.add(camera);
+  const inst = new THREE.InstancedMesh(geo, mat, od.items.length);
+  overdrawInstancedMesh = inst;
+  // Instance matrices are local to the camera-attached InstancedMesh.
+  {
+    const m4 = new THREE.Matrix4();
+    od.items.forEach((q, i) => {
+      m4.makeScale(q.sideW, q.sideH, 1);
+      m4.setPosition(q.x, q.y, q.z);
+      inst.setMatrixAt(i, m4);
+    });
+    inst.instanceMatrix.needsUpdate = true;
+  }
+  inst.frustumCulled = false;
+  // The shared layout is already ordered back to front.
+  overdrawGroup.add(inst);
+  info.actual.coverage = params.coverage;
+  info.actual.overdrawLayers = od.layers;
+  info.actual.overdrawQuads = od.quadCount;
+  info.actual.overdrawExpectedBlends = od.expectedPixelBlends;
+  info.actual.overdrawInstanced = true;
+  info.actual.overdrawAlpha = OVERDRAW_ALPHA;
+  info.actual.overdrawAlphaAnimated = false;
+  info.actual.overdrawMaterial = `MeshStandardMaterial (4 PBR maps, opacity=${OVERDRAW_ALPHA})`;
+  info.actual.overdrawTextureInputs = 4;
+  info.actual.totalTriangles = od.quadCount * 2;
+  info.actual.vertexCountPerMesh = 4;
+}
+
+info.actual.objects = objects.length;
+info.actual.instances = objectCount;
+info.actual.lights = lights.length;
+info.actual.lightPolicy = 'forward-all-lights';
+
+// ---- Shader warmup ----
+state.assetsLoaded = true;
+info.timings.assetsLoadedMs = performance.now();
+{
+  const c0 = cameraAt(0, params.bodies > 0 ? 'physics' : null);
+  camera.position.set(c0.x, c0.y, c0.z);
+  camera.lookAt(c0.tx, c0.ty, c0.tz);
+  renderer.compile(scene, camera);
+  state.shaderReady = true;
+  info.timings.shaderReadyMs = performance.now();
+}
+
+function engineTick(t, dt) {
+  // Keep camera and light inputs fixed during the PBR pixel case.
+  const sceneTime = params.coverage > 0 ? 0 : t;
+  const c = cameraAt(sceneTime, params.bodies > 0 ? 'physics' : null);
+  camera.position.set(c.x, c.y, c.z);
+  camera.lookAt(c.tx, c.ty, c.tz);
+
+  if (params.animate) {
+    for (const o of objects) {
+      const d = o.userData;
+      o.rotation.y = d.rotationY + t * 0.0005;
+      o.position.y = d.y + Math.sin(t * 0.002 + d.phase) * 0.6;
+    }
+    if (params.coverage > 0 && overdrawInstancedMesh) {
+      overdrawLayout.forEach((q, i) => {
+        const x = q.x + Math.sin(t * q.motionSpeedX + q.motionPhaseX) * q.motionAmpX;
+        const y = q.y + Math.sin(t * q.motionSpeedY + q.motionPhaseY) * q.motionAmpY;
+        overdrawMatrix.makeScale(q.sideW, q.sideH, 1);
+        overdrawMatrix.setPosition(x, y, q.z);
+        overdrawInstancedMesh.setMatrixAt(i, overdrawMatrix);
+      });
+      overdrawInstancedMesh.instanceMatrix.needsUpdate = true;
+    } else {
+      for (const l of lights) {
+        const d = l.userData;
+        const ang = t * 0.0003 + d.phase;
+        l.position.x = Math.cos(ang) * d.orbit;
+        l.position.z = Math.sin(ang) * d.orbit;
+      }
+    }
+    // All harnesses use the same wall-clock accumulator and 1/60 fixed step.
+    if (rapierWorld && params.animate) {
+      physicsClock.advance(dt, () => rapierWorld.step());
+      for (const { body, idx } of physBodies) {
+        const t = body.translation(), r = body.rotation();
+        physQuat.set(r.x, r.y, r.z, r.w);
+        physMat.compose(physVec.set(t.x, t.y, t.z), physQuat, physScale);
+        physInstMesh.setMatrixAt(idx, physMat);
+      }
+      physInstMesh.instanceMatrix.needsUpdate = true;
+    }
+    if (mixers.length) {
+      const dt = 1 / 60;
+      for (const m of mixers) m.update(dt);
+    }
+    // Layers translate but do not rotate, preserving exact full-screen coverage.
+  }
+  renderer.render(scene, camera);
+}
+
+// Debug handles for manual inspection.
+window.__SCENE_REFS__ = { THREE, scene, camera, renderer, physBodies, rapierWorld };
+
+runLoop({
+  state, info, params, engineTick, gpuTimer,
+  onFinish() {
+    info.framebufferCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
+    if (overdrawMaterial) info.actual.overdrawActiveSamplers = inspectActiveSamplers(renderer.getContext());
+    if (overdrawMaterial) {
+      const opacity = overdrawMaterial.opacity;
+      const emissive = overdrawMaterial.emissive.clone();
+      overdrawMaterial.opacity = 1;
+      overdrawMaterial.emissive.setRGB(1, 1, 1);
+      renderer.render(scene, camera);
+      info.overdrawGeometryCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
+      overdrawMaterial.opacity = opacity;
+      overdrawMaterial.emissive.copy(emissive);
+      renderer.render(scene, camera);
+    }
+    info.engineReported = {
+      drawCalls: renderer.info.render.calls,
+      triangles: renderer.info.render.triangles,
+      programs: renderer.info.programs ? renderer.info.programs.length : null,
+      geometries: renderer.info.memory.geometries,
+      textures: renderer.info.memory.textures,
+    };
+    if (physicsClock.totalSteps) info.actual.physSteps = physicsClock.totalSteps;
+    if (performance.memory) info.jsHeapMB = performance.memory.usedJSHeapSize / 1048576;
+    hud.textContent = `three done  ${info.frame.frameCount}f p95=${info.frame.p95?.toFixed(1)}ms`
+      + `\ndraw=${info.probe?.drawCalls} tri=${info.probe?.triangles}`;
+  },
+});
+hud.textContent = `three  case=${params.caseId} obj=${info.actual.objects} L=${lights.length}`;
+</script>
+</body>
+</html>
