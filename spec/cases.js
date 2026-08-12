@@ -10,7 +10,11 @@ export const DOMAINS = {
   },
   render: {
     title: 'Rendering',
-    note: 'Rendering bottlenecks split into lighting, draw submission, and PBR pixel cost.',
+    note: 'Rendering bottlenecks split into lighting, shadows, visibility, draw submission, and PBR pixel cost.',
+  },
+  interaction: {
+    title: 'Interaction',
+    note: 'CPU-side scene queries commonly used by selection, weapons, navigation, and gameplay.',
   },
   animation: {
     title: 'Animation',
@@ -21,7 +25,7 @@ export const DOMAINS = {
     note: 'Complete renderer plus recommended third-party physics-library stacks.',
   },
 };
-export const DOMAIN_ORDER = ['baseline', 'render', 'animation', 'physics'];
+export const DOMAIN_ORDER = ['baseline', 'render', 'interaction', 'animation', 'physics'];
 
 // Shared scene defaults. Each case overrides the parameters it controls.
 export const DEFAULTS = {
@@ -29,6 +33,13 @@ export const DEFAULTS = {
   triangles: 0,
   lights: 0,
   coverage: 0,
+  shadowCasters: 0,
+  shadowLights: 0,
+  shadowMapSize: 0,
+  visibilityObjects: 0,
+  visibleFraction: 0,
+  raycasts: 0,
+  raycastTargets: 0,
   skinned: 0,
   bodies: 0,
   maxWarmupMs: 0,
@@ -54,6 +65,32 @@ export const CASES = {
         + 'Babylon.js maxSimultaneousLights=4, and PlayCanvas clustered lighting.',
   },
 
+  shadows: {
+    domain: 'render',
+    axis: 'shadowCasters',
+    ladder: [1000, 2500, 5000, 10000, 20000],
+    gpuTiming: true,
+    fixed: { objects: 0, triangles: 0, lights: 0, shadowLights: 1, shadowMapSize: 2048, animate: 1 },
+    note: 'One instanced draw of 1,000-20,000 moving 560-triangle sphere casters under one aligned hard-shadow spotlight and 2048x2048 map.',
+  },
+
+  'shadow-maps': {
+    domain: 'render',
+    axis: 'shadowLights',
+    ladder: [1, 2, 4, 8],
+    gpuTiming: true,
+    fixed: { objects: 0, triangles: 0, lights: 0, shadowCasters: 1000, shadowMapSize: 2048, animate: 1 },
+    note: 'One thousand moving 560-triangle instanced casters under 1-8 aligned hard-shadow spotlights; the 8-map rung submits 5.04 million triangles.',
+  },
+
+  visibility: {
+    domain: 'render',
+    axis: 'visibilityObjects',
+    ladder: [1000, 5000, 10000, 20000],
+    fixed: { objects: 0, triangles: 0, visibleFraction: 0.1, lights: 1, animate: 0 },
+    note: 'Shared box meshes with 10% inside a fixed camera frustum and 90% outside it.',
+  },
+
   drawcalls: {
     domain: 'render',
     axis: 'objects',
@@ -62,11 +99,21 @@ export const CASES = {
     note: 'Keeps total geometry near 1.2M triangles while increasing independent mesh count.',
   },
 
+  raycast: {
+    domain: 'interaction',
+    axis: 'raycasts',
+    ladder: [1, 8, 32, 128],
+    fixed: { objects: 0, triangles: 0, raycastTargets: 5000, lights: 0, animate: 0 },
+    note: 'Per-frame linear AABB ray queries using each engine math API; every ray has one deterministic hit.',
+  },
+
   'overdraw-pbr': {
     domain: 'render',
     axis: 'coverage',
     ladder: [8, 32, 64, 128],
     capacity: false,
+    gpuTiming: true,
+    primaryMetric: 'gpu',
     fixed: { objects: 0, lights: 0, animate: 1 },
     note: 'Full-screen transparent layers with alpha 0.1, deterministic motion, and the same '
         + 'four 512x512 PBR maps. Uses each engine default lit PBR material and GPU p95.',

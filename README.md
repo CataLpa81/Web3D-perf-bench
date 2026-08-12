@@ -23,8 +23,12 @@ Read the current interpretation of the results in **[CONCLUSION.md](./CONCLUSION
 |---|---|---|
 | `empty` | Engine and render-loop baseline | CPU p95 |
 | `lights` | 4–64 dynamic point lights | CPU p95 |
+| `shadows` | 1,000–20,000 moving 560-triangle instances under one spotlight shadow map; up to 22.4M submitted triangles | Frame and GPU p95 |
+| `shadow-maps` | 1–8 independent 2048² shadow maps over 1,000 moving instances; up to 5.04M submitted triangles | Frame and GPU p95 |
+| `visibility` | 1,000–20,000 objects with 10% inside the camera frustum | CPU p95 |
 | `drawcalls` | 500–10,000 individual meshes | CPU p95 |
 | `overdraw-pbr` | 8–128 full-screen transparent PBR layers | GPU p95 |
+| `raycast` | 1–128 linear AABB ray queries across 5,000 targets per frame | CPU p95 |
 | `skinned` | 100–1,200 animated characters | CPU p95 |
 | `physics` | 500–10,000 dynamic rigid bodies | CPU p95 |
 
@@ -60,9 +64,12 @@ node runner/collect.mjs --case=lights,drawcalls
 node runner/collect.mjs --domain=render
 node runner/collect.mjs --engine=three
 node runner/collect.mjs --case=empty --headed
+node runner/collect.mjs --case=shadows,visibility,raycast --duration=6000 --repeats=5
 ```
 
-Each point uses one 3-second sample and may run longer when a heavy workload needs more samples.
+Each point defaults to one 3-second sample and may run longer when a heavy workload needs more samples.
+Use `--duration`, `--repeats`, and `--min-frames` for longer repeated batches. Engine order rotates
+between repeats to reduce fixed-order bias.
 
 ## Manual Inspection
 
@@ -80,6 +87,9 @@ construction and engine behavior; automated collection should be used for record
 - Seeded layouts and shared geometry make scene inputs verifiable.
 - A blocking parity gate rejects software rendering, unequal inputs, blank output, and invalid samples.
 - Draw calls and triangles are measured at the WebGL API instead of using engine statistics.
+- Shadow caster/light layout signatures, projection inputs, independent map storage, map size, and submitted work are parity-gated.
+- Shadow cases use a normalized forward path with one independent hard-shadow 2D map per spotlight; PlayCanvas clustered shadow atlasing is disabled for these cases.
+- Culling inputs, ray count, ray target count, and deterministic ray hits are parity-gated.
 - The PBR pixel test uses `EXT_disjoint_timer_query_webgl2` and is excluded from capacity rankings because the
   default materials provide different features and output quality.
 - Physics compares complete stacks: three.js + Rapier, Babylon.js + Havok, and PlayCanvas + Ammo.

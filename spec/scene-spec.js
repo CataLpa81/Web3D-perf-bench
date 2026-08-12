@@ -55,6 +55,107 @@ export function buildQuad(flipWinding = false) {
   return { positions, normals, uvs, indices, vertexCount: 4, indexCount: 6, triangleCount: 2 };
 }
 
+// Shared 24-vertex box with per-face normals.
+export function buildBox(flipWinding = false) {
+  const positions = new Float32Array([
+    // +X
+    0.5,-0.5,-0.5, 0.5,-0.5,0.5, 0.5,0.5,-0.5, 0.5,0.5,0.5,
+    // -X
+    -0.5,-0.5,0.5, -0.5,-0.5,-0.5, -0.5,0.5,0.5, -0.5,0.5,-0.5,
+    // +Y
+    -0.5,0.5,-0.5, 0.5,0.5,-0.5, -0.5,0.5,0.5, 0.5,0.5,0.5,
+    // -Y
+    -0.5,-0.5,0.5, 0.5,-0.5,0.5, -0.5,-0.5,-0.5, 0.5,-0.5,-0.5,
+    // +Z
+    0.5,-0.5,0.5, -0.5,-0.5,0.5, 0.5,0.5,0.5, -0.5,0.5,0.5,
+    // -Z
+    -0.5,-0.5,-0.5, 0.5,-0.5,-0.5, -0.5,0.5,-0.5, 0.5,0.5,-0.5,
+  ]);
+  const normals = new Float32Array([
+    1,0,0, 1,0,0, 1,0,0, 1,0,0,
+    -1,0,0, -1,0,0, -1,0,0, -1,0,0,
+    0,1,0, 0,1,0, 0,1,0, 0,1,0,
+    0,-1,0, 0,-1,0, 0,-1,0, 0,-1,0,
+    0,0,1, 0,0,1, 0,0,1, 0,0,1,
+    0,0,-1, 0,0,-1, 0,0,-1, 0,0,-1,
+  ]);
+  const uvs = new Float32Array([
+    0,0, 1,0, 0,1, 1,1, 0,0, 1,0, 0,1, 1,1,
+    0,0, 1,0, 0,1, 1,1, 0,0, 1,0, 0,1, 1,1,
+    0,0, 1,0, 0,1, 1,1, 0,0, 1,0, 0,1, 1,1,
+  ]);
+  const base = [
+    0,2,1, 2,3,1, 4,6,5, 6,7,5, 8,10,9, 10,11,9,
+    12,14,13, 14,15,13, 16,18,17, 18,19,17, 20,22,21, 22,23,21,
+  ];
+  const indices = new Uint32Array(base);
+  if (flipWinding) {
+    for (let i = 0; i < indices.length; i += 3) {
+      const t = indices[i + 1]; indices[i + 1] = indices[i + 2]; indices[i + 2] = t;
+    }
+  }
+  return { positions, normals, uvs, indices, vertexCount: 24, indexCount: 36, triangleCount: 12 };
+}
+
+// Shared UV sphere used by the shadow benchmark. At 20x15 segments this
+// produces 560 triangles per instance without increasing draw-call count.
+export function buildUvSphere(widthSegments = 20, heightSegments = 15, flipWinding = false) {
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+  const grid = [];
+
+  for (let y = 0; y <= heightSegments; y++) {
+    const row = [];
+    const v = y / heightSegments;
+    const phi = v * Math.PI;
+    for (let x = 0; x <= widthSegments; x++) {
+      const u = x / widthSegments;
+      const theta = u * Math.PI * 2;
+      const px = -Math.cos(theta) * Math.sin(phi);
+      const py = Math.cos(phi);
+      const pz = Math.sin(theta) * Math.sin(phi);
+      row.push(positions.length / 3);
+      positions.push(px, py, pz);
+      normals.push(px, py, pz);
+      uvs.push(u, 1 - v);
+    }
+    grid.push(row);
+  }
+
+  for (let y = 0; y < heightSegments; y++) {
+    for (let x = 0; x < widthSegments; x++) {
+      const a = grid[y][x + 1];
+      const b = grid[y][x];
+      const c = grid[y + 1][x];
+      const d = grid[y + 1][x + 1];
+      if (y !== 0) indices.push(a, b, d);
+      if (y !== heightSegments - 1) indices.push(b, c, d);
+    }
+  }
+
+  if (flipWinding) {
+    for (let i = 0; i < indices.length; i += 3) {
+      const t = indices[i + 1];
+      indices[i + 1] = indices[i + 2];
+      indices[i + 2] = t;
+    }
+  }
+
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array(normals),
+    uvs: new Float32Array(uvs),
+    indices: new Uint32Array(indices),
+    vertexCount: positions.length / 3,
+    indexCount: indices.length,
+    triangleCount: indices.length / 3,
+    widthSegments,
+    heightSegments,
+  };
+}
+
 // Resolve grid segmentation from target total triangles and mesh count.
 export function segForTriangles(totalTris, meshCount) {
   const perMesh = totalTris / meshCount;
@@ -107,6 +208,114 @@ export function buildLightLayout(count, opts = {}) {
     });
   }
   return lights;
+}
+
+export function buildShadowLayout(count, opts = {}) {
+  const items = buildObjectLayout(count, {
+    seed: opts.seed ?? 0x51ad,
+    fieldRadius: opts.fieldRadius ?? 18,
+    scale: opts.scale ?? 0.8,
+  });
+  for (const item of items) item.y = 0.8 + (item.i % 7) * 0.9;
+  return { items, count, groundSize: 52 };
+}
+
+export function buildShadowLightLayout(count, opts = {}) {
+  const radius = opts.radius ?? 18;
+  const height = opts.height ?? 32;
+  const targetHeight = opts.targetHeight ?? 3;
+  const lights = [];
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2;
+    const x = Math.cos(angle) * radius;
+    const y = height;
+    const z = Math.sin(angle) * radius;
+    const dx = -x;
+    const dy = targetHeight - y;
+    const dz = -z;
+    const len = Math.hypot(dx, dy, dz);
+    lights.push({
+      i, x, y, z,
+      tx: 0, ty: targetHeight, tz: 0,
+      dx: dx / len, dy: dy / len, dz: dz / len,
+    });
+  }
+  return lights;
+}
+
+function numericSignature(rows) {
+  let hash = 2166136261;
+  for (const row of rows) {
+    for (const value of row) {
+      hash ^= Math.round(value * 1e6);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+export function shadowCasterLayoutSignature(layout) {
+  return numericSignature(layout.items.map(item => [
+    item.i, item.x, item.y, item.z, item.rotationY, item.scale, item.phase,
+  ]));
+}
+
+export function shadowLightLayoutSignature(lights) {
+  return numericSignature(lights.map(light => [
+    light.i, light.x, light.y, light.z,
+    light.tx, light.ty, light.tz,
+    light.dx, light.dy, light.dz,
+  ]));
+}
+
+// Keep a deterministic fraction in view while the remainder stays far outside the fixed frustum.
+export function buildVisibilityLayout(count, visibleFraction = 0.1) {
+  const visibleCount = Math.max(1, Math.round(count * visibleFraction));
+  const items = [];
+  const addVolume = (n, visible, centerX) => {
+    const side = Math.ceil(Math.cbrt(n));
+    const spacing = visible ? 1.45 : 1.1;
+    for (let i = 0; i < n; i++) {
+      const x = i % side;
+      const z = Math.floor(i / side) % side;
+      const y = Math.floor(i / (side * side));
+      items.push({
+        i: items.length,
+        x: centerX + (x - (side - 1) / 2) * spacing,
+        y: 0.5 + y * spacing,
+        z: (z - (side - 1) / 2) * spacing,
+        rotationY: 0,
+        scale: visible ? 0.8 : 0.6,
+        visible,
+      });
+    }
+  };
+  addVolume(visibleCount, true, 0);
+  addVolume(count - visibleCount, false, 260);
+  return { items, count, visibleCount, hiddenCount: count - visibleCount, visibleFraction };
+}
+
+// Rays descend through unique grid cells, producing one AABB hit per query.
+export function buildRaycastLayout(targetCount, rayCount) {
+  const side = Math.ceil(Math.sqrt(targetCount));
+  const spacing = 1.5;
+  const targets = [];
+  for (let i = 0; i < targetCount; i++) {
+    targets.push({
+      i,
+      x: (i % side - (side - 1) / 2) * spacing,
+      y: 0.5,
+      z: (Math.floor(i / side) - (side - 1) / 2) * spacing,
+      hx: 0.4, hy: 0.5, hz: 0.4,
+    });
+  }
+  const rays = [];
+  for (let i = 0; i < rayCount; i++) {
+    const targetIndex = Math.min(targetCount - 1, Math.floor((i + 0.5) * targetCount / rayCount));
+    const t = targets[targetIndex];
+    rays.push({ i, targetIndex, ox: t.x, oy: 10, oz: t.z, dx: 0, dy: -1, dz: 0 });
+  }
+  return { targets, rays, targetCount, rayCount, expectedHits: rayCount };
 }
 
 // ambientCG Metal063, CC0, resized to 512x512.

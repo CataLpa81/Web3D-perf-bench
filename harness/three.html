@@ -25,7 +25,7 @@
 import '/harness/common/probe.js';
 import { createHarness, createFixedStepClock, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
 import { cameraAt } from '/spec/contract.js';
-import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildPhysicsLayout } from '/spec/scene-spec.js';
+import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildBox, buildUvSphere, buildShadowLayout, buildShadowLightLayout, shadowCasterLayoutSignature, shadowLightLayoutSignature, buildVisibilityLayout, buildRaycastLayout, buildPhysicsLayout } from '/spec/scene-spec.js';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
@@ -46,7 +46,8 @@ canvas.style.height = CONTRACT.viewport.h + 'px';
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: CONTRACT.antialias });
 renderer.setPixelRatio(CONTRACT.devicePixelRatio);
 renderer.setSize(CONTRACT.viewport.w, CONTRACT.viewport.h, false);
-const gpuTimer = params.coverage > 0 ? createGpuTimer(renderer.getContext()) : null;
+const gpuTimer = (params.coverage > 0 || params.shadowCasters > 0)
+  ? createGpuTimer(renderer.getContext()) : null;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(CONTRACT.clearColor.r, CONTRACT.clearColor.g, CONTRACT.clearColor.b);
@@ -66,13 +67,16 @@ info.defaults = {
 }
 
 // ---- Shared directional light ----
+let baseLight = null;
 {
   const A = CONTRACT.baseLight;
-  const intensity = params.coverage > 0 ? A.pbrPixelIntensity : A.intensity;
+  const intensity = params.coverage > 0 ? A.pbrPixelIntensity
+    : (params.shadowCasters > 0 ? A.shadowFillIntensity : A.intensity);
   const base = new THREE.DirectionalLight(new THREE.Color(A.color.r, A.color.g, A.color.b), intensity);
   // DirectionalLight points from position to its target at the origin.
   base.position.set(-A.direction.x * 50, -A.direction.y * 50, -A.direction.z * 50);
   scene.add(base);
+  baseLight = base;
   info.actual.baseLight = 'DirectionalLight intensity=' + intensity;
 }
 
@@ -114,6 +118,157 @@ if (objectCount > 0) {
   info.actual.seg = seg;
   info.actual.totalTriangles = grid.triangleCount * objectCount;
   info.actual.vertexCountPerMesh = grid.vertexCount;
+}
+
+const makeBoxGeometry = (flipWinding = false) => {
+  const box = buildBox(flipWinding);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(box.positions, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(box.normals, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(box.uvs, 2));
+  geo.setIndex(new THREE.BufferAttribute(box.indices, 1));
+  return { box, geo };
+};
+
+const makeShadowCasterGeometry = () => {
+  const S = CONTRACT.shadow;
+  const caster = buildUvSphere(S.casterWidthSegments, S.casterHeightSegments);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(caster.positions, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(caster.normals, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(caster.uvs, 2));
+  geo.setIndex(new THREE.BufferAttribute(caster.indices, 1));
+  return { caster, geo };
+};
+
+// ---- Instanced dynamic spotlight shadows ----
+let shadowLayout = null;
+let shadowInstancedMesh = null;
+const shadowLights = [];
+const shadowMatrix = new THREE.Matrix4();
+const shadowQuat = new THREE.Quaternion();
+const shadowPosition = new THREE.Vector3();
+const shadowScale = new THREE.Vector3();
+const shadowAxisY = new THREE.Vector3(0, 1, 0);
+
+function updateShadowInstances(t) {
+  if (!shadowInstancedMesh || !shadowLayout) return;
+  shadowLayout.items.forEach((item, i) => {
+    shadowPosition.set(
+      item.x,
+      item.y + Math.sin(t * 0.002 + item.phase) * 0.25,
+      item.z);
+    shadowQuat.setFromAxisAngle(shadowAxisY, item.rotationY + t * 0.0008);
+    shadowScale.setScalar(item.scale);
+    shadowMatrix.compose(shadowPosition, shadowQuat, shadowScale);
+    shadowInstancedMesh.setMatrixAt(i, shadowMatrix);
+  });
+  shadowInstancedMesh.instanceMatrix.needsUpdate = true;
+}
+
+if (params.shadowCasters > 0) {
+  const { caster, geo } = makeShadowCasterGeometry();
+  shadowLayout = buildShadowLayout(params.shadowCasters);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xc48a58 });
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.BasicShadowMap;
+
+  shadowInstancedMesh = new THREE.InstancedMesh(geo, mat, shadowLayout.items.length);
+  shadowInstancedMesh.castShadow = true;
+  shadowInstancedMesh.receiveShadow = true;
+  shadowInstancedMesh.frustumCulled = false;
+  scene.add(shadowInstancedMesh);
+  updateShadowInstances(0);
+
+  const S = CONTRACT.shadow;
+  const shadowLightLayout = buildShadowLightLayout(params.shadowLights, {
+    radius: S.lightRadius, height: S.lightHeight, targetHeight: S.targetHeight,
+  });
+  for (const L of shadowLightLayout) {
+    const light = new THREE.SpotLight(
+      0xffffff, S.intensity, S.far,
+      S.coneHalfAngleDeg * Math.PI / 180, 0, 2);
+    light.position.set(L.x, L.y, L.z);
+    light.target.position.set(L.tx, L.ty, L.tz);
+    light.castShadow = true;
+    light.shadow.mapSize.set(params.shadowMapSize, params.shadowMapSize);
+    light.shadow.camera.near = S.near;
+    light.shadow.camera.far = S.far;
+    scene.add(light, light.target);
+    shadowLights.push(light);
+  }
+  const ground = new THREE.Mesh(
+    new THREE.BoxGeometry(shadowLayout.groundSize, 1, shadowLayout.groundSize),
+    new THREE.MeshStandardMaterial({ color: 0x30353e }));
+  ground.position.y = -0.5;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  info.actual.shadowCasters = shadowLayout.items.length;
+  info.actual.shadowLights = shadowLights.length;
+  info.actual.shadowMaps = shadowLights.length;
+  info.actual.shadowMapSize = params.shadowMapSize;
+  info.actual.shadowType = 'hard-single-sample';
+  info.actual.engineShadowType = 'THREE.BasicShadowMap';
+  info.actual.shadowMapStorage = 'independent-2d-per-light';
+  info.actual.shadowCasterLayoutSignature = shadowCasterLayoutSignature(shadowLayout);
+  info.actual.shadowLightLayoutSignature = shadowLightLayoutSignature(shadowLightLayout);
+  info.actual.shadowProjectionSignature =
+    `${S.near}|${S.far}|${S.coneHalfAngleDeg}|${S.intensity}|inverse-square`;
+  info.actual.shadowCasterGeometry =
+    `uv-sphere:${S.casterWidthSegments}x${S.casterHeightSegments}`;
+  info.actual.shadowTrianglesPerCaster = caster.triangleCount;
+  info.actual.shadowInstanced = true;
+  info.actual.expectedShadowDrawCalls = shadowLights.length + 2;
+  info.actual.expectedShadowTriangles =
+    caster.triangleCount * shadowLayout.items.length * (shadowLights.length + 1) + 12;
+  info.actual.totalTriangles = caster.triangleCount * shadowLayout.items.length;
+  info.actual.vertexCountPerMesh = caster.vertexCount;
+}
+
+// ---- Default frustum culling ----
+const visibilityObjects = [];
+if (params.visibilityObjects > 0) {
+  const { box, geo } = makeBoxGeometry();
+  const layout = buildVisibilityLayout(params.visibilityObjects, params.visibleFraction);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x70a6c8 });
+  for (const it of layout.items) {
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(it.x, it.y, it.z);
+    mesh.scale.setScalar(it.scale);
+    scene.add(mesh);
+    visibilityObjects.push(mesh);
+  }
+  info.actual.visibilityObjects = visibilityObjects.length;
+  info.actual.expectedVisibleObjects = layout.visibleCount;
+  info.actual.visibleFraction = layout.visibleFraction;
+  info.actual.cullingPolicy = 'Object3D.frustumCulled=true(default)';
+  info.actual.totalTriangles = box.triangleCount * visibilityObjects.length;
+  info.actual.vertexCountPerMesh = box.vertexCount;
+}
+
+// ---- CPU AABB ray queries ----
+let raycastHits = 0;
+let raycastExpectedHits = 0;
+const raycastBoxes = [];
+const raycastRays = [];
+if (params.raycastTargets > 0 && params.raycasts > 0) {
+  const layout = buildRaycastLayout(params.raycastTargets, params.raycasts);
+  for (const t of layout.targets) {
+    raycastBoxes.push(new THREE.Box3(
+      new THREE.Vector3(t.x - t.hx, t.y - t.hy, t.z - t.hz),
+      new THREE.Vector3(t.x + t.hx, t.y + t.hy, t.z + t.hz)));
+  }
+  for (const r of layout.rays) {
+    raycastRays.push(new THREE.Ray(
+      new THREE.Vector3(r.ox, r.oy, r.oz),
+      new THREE.Vector3(r.dx, r.dy, r.dz)));
+  }
+  raycastExpectedHits = layout.expectedHits;
+  info.actual.raycastTargets = layout.targetCount;
+  info.actual.raycasts = layout.rayCount;
+  info.actual.raycastExpectedHits = layout.expectedHits;
+  info.actual.raycastPolicy = 'linear THREE.Ray.intersectsBox';
 }
 
 // ---- Physics: Rapier ----
@@ -251,16 +406,18 @@ if (params.coverage > 0) {
   info.actual.vertexCountPerMesh = 4;
 }
 
-info.actual.objects = objects.length;
-info.actual.instances = objectCount;
-info.actual.lights = lights.length;
+info.actual.objects = objects.length + (shadowLayout?.items.length ?? 0) + visibilityObjects.length;
+info.actual.instances = objectCount + (shadowLayout?.items.length ?? 0) + visibilityObjects.length;
+info.actual.lights = lights.length + shadowLights.length;
 info.actual.lightPolicy = 'forward-all-lights';
 
 // ---- Shader warmup ----
 state.assetsLoaded = true;
 info.timings.assetsLoadedMs = performance.now();
 {
-  const c0 = cameraAt(0, params.bodies > 0 ? 'physics' : null);
+  const cameraPreset = params.bodies > 0 ? 'physics'
+    : ((params.visibilityObjects > 0 || params.raycasts > 0) ? 'visibility' : null);
+  const c0 = cameraAt(0, cameraPreset);
   camera.position.set(c0.x, c0.y, c0.z);
   camera.lookAt(c0.tx, c0.ty, c0.tz);
   renderer.compile(scene, camera);
@@ -271,7 +428,9 @@ info.timings.assetsLoadedMs = performance.now();
 function engineTick(t, dt) {
   // Keep camera and light inputs fixed during the PBR pixel case.
   const sceneTime = params.coverage > 0 ? 0 : t;
-  const c = cameraAt(sceneTime, params.bodies > 0 ? 'physics' : null);
+  const cameraPreset = params.bodies > 0 ? 'physics'
+    : ((params.visibilityObjects > 0 || params.raycasts > 0) ? 'visibility' : null);
+  const c = cameraAt(sceneTime, cameraPreset);
   camera.position.set(c.x, c.y, c.z);
   camera.lookAt(c.tx, c.ty, c.tz);
 
@@ -281,6 +440,7 @@ function engineTick(t, dt) {
       o.rotation.y = d.rotationY + t * 0.0005;
       o.position.y = d.y + Math.sin(t * 0.002 + d.phase) * 0.6;
     }
+    updateShadowInstances(t);
     if (params.coverage > 0 && overdrawInstancedMesh) {
       overdrawLayout.forEach((q, i) => {
         const x = q.x + Math.sin(t * q.motionSpeedX + q.motionPhaseX) * q.motionAmpX;
@@ -315,6 +475,13 @@ function engineTick(t, dt) {
     }
     // Layers translate but do not rotate, preserving exact full-screen coverage.
   }
+  if (raycastRays.length) {
+    let hits = 0;
+    for (const ray of raycastRays) {
+      for (const box of raycastBoxes) if (ray.intersectsBox(box)) hits++;
+    }
+    raycastHits = hits;
+  }
   renderer.render(scene, camera);
 }
 
@@ -345,6 +512,10 @@ runLoop({
       textures: renderer.info.memory.textures,
     };
     if (physicsClock.totalSteps) info.actual.physSteps = physicsClock.totalSteps;
+    if (raycastRays.length) {
+      info.actual.raycastHits = raycastHits;
+      info.actual.raycastParity = raycastHits === raycastExpectedHits;
+    }
     if (performance.memory) info.jsHeapMB = performance.memory.usedJSHeapSize / 1048576;
     hud.textContent = `three done  ${info.frame.frameCount}f p95=${info.frame.p95?.toFixed(1)}ms`
       + `\ndraw=${info.probe?.drawCalls} tri=${info.probe?.triangles}`;

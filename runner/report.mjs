@@ -48,7 +48,7 @@ function pick(caseId, value, engine) {
   const rs = data.records.filter(r => r.caseId === caseId && r.value === value && r.engine === engine);
   if (!rs.length) return null;
   const limited = rs.find(r => r.engineLimit);
-  const usesGpuTimer = caseId === 'overdraw-pbr';
+  const usesGpuTimer = CASES[caseId]?.primaryMetric === 'gpu';
   const metricOf = (r) => usesGpuTimer ? r.info?.gpuFrame : r.info?.frame;
   const valid = rs.filter(r => r.valid && metricOf(r)?.p95 != null);
   if (!valid.length) {
@@ -65,6 +65,7 @@ function pick(caseId, value, engine) {
     drawCalls: mid.info.probe?.drawCalls, triangles: mid.info.probe?.triangles,
     litRatio: mid.info.framebufferCoverage,
     policy: mid.info.actual?.lightPolicy, repeats: valid.length,
+    gpuP95: !usesGpuTimer && CASES[caseId]?.gpuTiming ? mid.info.gpuFrame?.p95 : null,
   };
 }
 
@@ -73,7 +74,8 @@ function p95Cell(rec) {
   if (rec.limit) return `<td class="lim" title="${esc(rec.limit)}">Engine limit</td>`;
   if (rec.p95 == null) return `<td class="na" title="${esc(rec.invalid || '')}">Invalid</td>`;
   const cls = rec.p95 <= VSYNC_BUDGET.fps60 ? 'ok' : (rec.p95 <= VSYNC_BUDGET.fps30 ? 'warn' : 'bad');
-  return `<td class="${cls}">${fmt(rec.p95)}</td>`;
+  const gpu = rec.gpuP95 == null ? '' : `<br><span class="dim">GPU ${fmt(rec.gpuP95)}</span>`;
+  return `<td class="${cls}">${fmt(rec.p95)}${gpu}</td>`;
 }
 
 // Preserve records from older matrices under an explicit unknown domain.
@@ -163,7 +165,7 @@ for (const caseId of caseIds) {
     <table class="lit"><thead><tr><th>Lights</th>${ENGINES.map(e => `<th>${e}</th>`).join('')}</tr></thead><tbody>${lr}</tbody></table>`;
   }
   const fixed = c?.fixed ? Object.entries(c.fixed).map(([k, v]) => `${k}=${v}`).join(' · ') : '';
-  const usesGpuTimer = caseId === 'overdraw-pbr';
+  const usesGpuTimer = c?.primaryMetric === 'gpu';
   const dom = domainOf(caseId);
   (sectionsByDomain[dom] ??= []).push(`<section>
     <h3>${esc(caseId)} <span class="ax">variable: ${esc(c?.axis || '—')}</span></h3>
@@ -176,6 +178,7 @@ for (const caseId of caseIds) {
       </thead>
       <tbody>${rows}</tbody>
     </table>
+    ${c?.gpuTiming && !usesGpuTimer ? '<p class="note">GPU p95 is shown below the end-to-end frame p95 in each timing cell.</p>' : ''}
     ${extra}
   </section>`);
 }

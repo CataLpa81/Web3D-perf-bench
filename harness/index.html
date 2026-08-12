@@ -187,7 +187,8 @@ function currentParams() {
 
 function showParams() {
   const c = CASES[curCase], p = currentParams();
-  const keys = ['objects', 'triangles', 'lights', 'coverage',
+  const keys = ['objects', 'triangles', 'lights', 'coverage', 'shadowCasters', 'shadowLights', 'shadowMapSize',
+                'visibilityObjects', 'visibleFraction', 'raycasts', 'raycastTargets',
                 'skinned', 'bodies', 'animate'];
   const shown = keys.filter(k => p[k]).map(k => `${k}=<b>${p[k]}</b>`);
   const bits = [`<span style="opacity:.55">${DOMAINS[c.domain].title}</span>`];

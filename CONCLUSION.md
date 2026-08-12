@@ -4,6 +4,7 @@ Engine versions: three.js 0.185.1, Babylon.js 9.20.0, PlayCanvas 2.21.3
 Environment: Apple M5 Pro, Headless Chrome 151, ANGLE Metal, 1280x720, DPR 1, vsync disabled,
 300 FPS ceiling  
 Regular sampling: 3 seconds per point, one repeat, at least 90 steady-state samples
+Visibility, raycast, and shadow attribution sampling: 6 seconds per point, five repeats
 
 > Main comparisons preserve engine defaults and align scene inputs rather than final images.
 > Shader modifications mentioned below were attribution experiments only.
@@ -13,9 +14,11 @@ Regular sampling: 3 seconds per point, one repeat, at least 90 steady-state samp
 **three.js delivered the strongest overall result. It was fastest or close to fastest in baseline
 overhead, high draw-call workloads, skeletal animation, and the tested physics stack. Its clear
 weakness was a large number of dynamic lights. PlayCanvas scaled better there through clustered
-lighting. PlayCanvas also has a cheaper default PBR fragment shader, but it provides a simpler
-feature and quality path, so that difference is a material-design tradeoff rather than a three.js
-performance weakness. Babylon.js showed higher per-mesh, animation, and object overhead.**
+lighting and had the lowest visibility-culling overhead. three.js had the fastest AABB ray
+implementation. PlayCanvas also has a cheaper default PBR fragment shader, but it provides a
+simpler feature and quality path, so that difference is a material-design tradeoff rather than a
+three.js performance weakness. Babylon.js showed higher per-mesh, animation, and active-mesh
+evaluation overhead.**
 
 ## Key Data
 
@@ -26,6 +29,8 @@ The table uses p95 frame time at the highest valid point shown. Lower is better.
 | Empty scene | **5.1ms** | **5.1ms** | 5.3ms | Effectively tied |
 | 64 dynamic point lights | 160.6ms | **6.8ms*** | 16.6ms | three.js scales poorly |
 | 10,000 draw calls | **12.1ms** | 26.3ms | 12.5ms | three.js and PlayCanvas lead |
+| 20,000 visibility objects | 8.2ms | 15.3ms | **7.8ms** | PlayCanvas leads |
+| 128 rays across 5,000 AABBs | **9.2ms** | 10.6ms | 20.7ms | three.js leads |
 | 1,200 skinned characters | **18.5ms** | 32.6ms | 26.8ms | three.js leads |
 | 5,000 dynamic bodies | **13.5ms** | 15.3ms | 34.7ms | three.js + Rapier leads |
 
@@ -88,7 +93,41 @@ three.js and PlayCanvas stayed close. At 10,000 draw calls both remained within 
 budget. CPU profiling attributed about 37.6% of Babylon.js CPU time to per-SubMesh material checks,
 light binding, and uniform preparation.
 
-## 4. Skeletal Animation
+## 4. Visibility Culling
+
+At 20,000 objects with 10% visible, p95 was 8.2ms in three.js, 15.3ms in Babylon.js, and 7.8ms in
+PlayCanvas. All engines submitted the same 2,000 visible draws. PlayCanvas scans a compact
+mesh-instance list; three.js recursively traverses its object tree; Babylon.js evaluates readiness,
+enabled state, LOD, activation, bounds, submeshes, and materials for each candidate.
+
+Changing Babylon.js to sphere-only culling produced 15.1ms, while `freezeActiveMeshes()` reduced
+p95 from 15.2ms to 7.8ms. Its primary cost is active-mesh evaluation rather than the final frustum
+intersection test.
+
+## 5. AABB Raycast
+
+At 128 rays across 5,000 AABBs per frame, p95 was 9.2ms in three.js, 10.6ms in Babylon.js, and
+20.7ms in PlayCanvas. The ranking comes from the math APIs: three.js and Babylon.js use scalar slab
+algorithms, while PlayCanvas uses a separating-axis path with more vector operations.
+
+A V8 control measured 3.30ms, 5.66ms, and 15.44ms respectively, confirming the same ordering. This
+result applies to linear AABB tests, not scene BVHs or physics-world raycasts.
+
+## 6. Dynamic Shadow Instance Updates
+
+The high-pressure single-map case uses 20,000 moving instances, 560 triangles per instance,
+22.4 million submitted triangles, three draw calls, and a full 1.28MB instance-matrix upload per
+frame.
+
+A renderer-independent control generated the same 20,000 matrices in 0.71ms for three.js, 0.98ms
+for Babylon.js, and 1.49ms for PlayCanvas.
+
+three.js uses a specialized axis-angle path, Babylon.js additionally normalizes the rotation axis,
+and PlayCanvas uses a general Euler-to-quaternion path. Disabling animation removes matrix
+generation and the full instance-buffer upload while draw calls remain unchanged, confirming that
+these operations are a material part of the high-caster frame cost.
+
+## 7. Skeletal Animation
 
 All engines load the same CesiumMan GLB: 19 bones, 4,672 triangles, and 57 animation channels.
 Character phases are offset by index.
@@ -118,7 +157,7 @@ A separate static-character control produced:
 
 Both tests indicate that the default three.js animation update path is substantially lighter.
 
-## 5. Default PBR Fragment Cost
+## 8. Default PBR Fragment Cost
 
 The scene uses 128 independently moving full-screen transparent layers, fixed `alpha=0.1`, disabled
 depth writes, the same albedo/normal/roughness/metalness maps, one directional light, one instanced
@@ -159,7 +198,7 @@ three.js spends more on multiscattering, energy compensation, geometric roughnes
 processing. This section explains default-material differences and does not rank equal-quality
 performance. Babylon.js did not produce a stable paired attribution sample.
 
-## 6. Physics Stack
+## 9. Physics Stack
 
 The compared stacks are three.js + Rapier, Babylon.js + Havok, and PlayCanvas + Ammo. Initial
 positions, sizes, masses, velocities, gravity, ground, and fixed 1/60 stepping are aligned.

@@ -19,7 +19,7 @@
 import '/harness/common/probe.js';
 import { createHarness, createFixedStepClock, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
 import { cameraAt } from '/spec/contract.js';
-import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildPhysicsLayout } from '/spec/scene-spec.js';
+import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildBox, buildUvSphere, buildShadowLayout, buildShadowLightLayout, shadowCasterLayoutSignature, shadowLightLayoutSignature, buildVisibilityLayout, buildRaycastLayout, buildPhysicsLayout } from '/spec/scene-spec.js';
 
 const params = readParams();
 const { state, info } = createHarness('babylon');
@@ -36,7 +36,8 @@ canvas.style.height = CONTRACT.viewport.h + 'px';
 // ---- Engine initialization ----
 const engine = new BABYLON.Engine(canvas, CONTRACT.antialias);
 engine.setHardwareScalingLevel(1 / CONTRACT.devicePixelRatio);
-const gpuTimer = params.coverage > 0 ? createGpuTimer(engine._gl) : null;
+const gpuTimer = (params.coverage > 0 || params.shadowCasters > 0)
+  ? createGpuTimer(engine._gl) : null;
 
 const scene = new BABYLON.Scene(engine);
 // Align coordinate handedness so the shared layout is not mirrored.
@@ -54,13 +55,16 @@ info.renderWidth = engine.getRenderWidth(true);
 info.renderHeight = engine.getRenderHeight(true);
 
 // ---- Shared directional light ----
+let baseLight = null;
 {
   const A = CONTRACT.baseLight;
-  const intensity = params.coverage > 0 ? A.pbrPixelIntensity : A.intensity;
+  const intensity = params.coverage > 0 ? A.pbrPixelIntensity
+    : (params.shadowCasters > 0 ? A.shadowFillIntensity : A.intensity);
   const base = new BABYLON.DirectionalLight('baseLight',
     new BABYLON.Vector3(A.direction.x, A.direction.y, A.direction.z), scene);
   base.intensity = intensity;
   base.diffuse = new BABYLON.Color3(A.color.r, A.color.g, A.color.b);
+  baseLight = base;
   info.actual.baseLight = 'DirectionalLight intensity=' + intensity;
 }
 
@@ -111,6 +115,179 @@ if (objectCount > 0) {
   info.actual.vertexCountPerMesh = grid.vertexCount;
   // Record the default without changing it.
   info.defaults.maxSimultaneousLights = mat.maxSimultaneousLights;
+}
+
+const createBoxSource = (name, material) => {
+  const box = buildBox(true);
+  const src = new BABYLON.Mesh(name, scene);
+  const vd = new BABYLON.VertexData();
+  vd.positions = box.positions; vd.normals = box.normals;
+  vd.uvs = box.uvs; vd.indices = box.indices;
+  vd.applyToMesh(src);
+  src.material = material;
+  return { box, src };
+};
+
+const createShadowCasterSource = (name, material) => {
+  const S = CONTRACT.shadow;
+  const caster = buildUvSphere(S.casterWidthSegments, S.casterHeightSegments, true);
+  const src = new BABYLON.Mesh(name, scene);
+  const vd = new BABYLON.VertexData();
+  vd.positions = caster.positions; vd.normals = caster.normals;
+  vd.uvs = caster.uvs; vd.indices = caster.indices;
+  vd.applyToMesh(src);
+  src.material = material;
+  return { caster, src };
+};
+
+// ---- Instanced dynamic spotlight shadows ----
+let shadowLayout = null;
+let shadowSource = null;
+let shadowInstanceData = null;
+const shadowLights = [];
+const shadowGenerators = [];
+const shadowMatrix = new BABYLON.Matrix();
+const shadowQuat = new BABYLON.Quaternion();
+const shadowPosition = new BABYLON.Vector3();
+const shadowScale = new BABYLON.Vector3();
+const shadowAxisY = BABYLON.Axis.Y;
+
+function updateShadowInstances(t) {
+  if (!shadowSource || !shadowLayout || !shadowInstanceData) return;
+  shadowLayout.items.forEach((item, i) => {
+    shadowPosition.set(
+      item.x,
+      item.y + Math.sin(t * 0.002 + item.phase) * 0.25,
+      item.z);
+    BABYLON.Quaternion.RotationAxisToRef(shadowAxisY, item.rotationY + t * 0.0008, shadowQuat);
+    shadowScale.setAll(item.scale);
+    BABYLON.Matrix.ComposeToRef(shadowScale, shadowQuat, shadowPosition, shadowMatrix);
+    shadowMatrix.copyToArray(shadowInstanceData, i * 16);
+  });
+  shadowSource.thinInstanceBufferUpdated('matrix');
+}
+
+if (params.shadowCasters > 0) {
+  const S = CONTRACT.shadow;
+  const mat = new BABYLON.PBRMaterial('shadowMat', scene);
+  mat.albedoColor = new BABYLON.Color3(0.77, 0.54, 0.35);
+  mat.metallic = 0; mat.roughness = 1;
+  const { caster, src } = createShadowCasterSource('shadow0', mat);
+  shadowLayout = buildShadowLayout(params.shadowCasters);
+  shadowSource = src;
+  shadowInstanceData = new Float32Array(shadowLayout.items.length * 16);
+  mat.maxSimultaneousLights = params.shadowLights + 1;
+  src.receiveShadows = true;
+  src.alwaysSelectAsActiveMesh = true;
+  src.thinInstanceSetBuffer('matrix', shadowInstanceData, 16, false);
+  updateShadowInstances(0);
+  src.thinInstanceRefreshBoundingInfo(true);
+
+  const shadowLightLayout = buildShadowLightLayout(params.shadowLights, {
+    radius: S.lightRadius, height: S.lightHeight, targetHeight: S.targetHeight,
+  });
+  for (const L of shadowLightLayout) {
+    const light = new BABYLON.SpotLight(
+      'shadowLight' + L.i,
+      new BABYLON.Vector3(L.x, L.y, L.z),
+      new BABYLON.Vector3(L.dx, L.dy, L.dz),
+      S.coneHalfAngleDeg * 2 * Math.PI / 180,
+      0,
+      scene);
+    light.innerAngle = S.coneHalfAngleDeg * 2 * Math.PI / 180;
+    light.falloffType = BABYLON.Light.FALLOFF_GLTF;
+    light.range = S.far;
+    light.intensity = S.intensity;
+    light.shadowMinZ = S.near;
+    light.shadowMaxZ = S.far;
+    const generator = new BABYLON.ShadowGenerator(params.shadowMapSize, light);
+    generator.bias = 0;
+    generator.normalBias = 0;
+    generator.usePoissonSampling = false;
+    generator.usePercentageCloserFiltering = false;
+    generator.useContactHardeningShadow = false;
+    generator.addShadowCaster(src, false);
+    shadowLights.push(light);
+    shadowGenerators.push(generator);
+  }
+  const ground = BABYLON.MeshBuilder.CreateBox(
+    'shadowGround', { width: shadowLayout.groundSize, height: 1, depth: shadowLayout.groundSize }, scene);
+  ground.position.y = -0.5;
+  const groundMat = new BABYLON.PBRMaterial('shadowGroundMat', scene);
+  groundMat.albedoColor = new BABYLON.Color3(0.19, 0.21, 0.24);
+  groundMat.metallic = 0; groundMat.roughness = 1;
+  groundMat.maxSimultaneousLights = params.shadowLights + 1;
+  ground.material = groundMat;
+  ground.receiveShadows = true;
+
+  info.actual.shadowCasters = shadowLayout.items.length;
+  info.actual.shadowLights = shadowLights.length;
+  info.actual.shadowMaps = shadowGenerators.length;
+  info.actual.shadowMapSize = params.shadowMapSize;
+  info.actual.shadowType = 'hard-single-sample';
+  info.actual.engineShadowType = 'BABYLON.ShadowGenerator basic';
+  info.actual.shadowMapStorage = 'independent-2d-per-light';
+  info.actual.shadowCasterLayoutSignature = shadowCasterLayoutSignature(shadowLayout);
+  info.actual.shadowLightLayoutSignature = shadowLightLayoutSignature(shadowLightLayout);
+  info.actual.shadowProjectionSignature =
+    `${S.near}|${S.far}|${S.coneHalfAngleDeg}|${S.intensity}|inverse-square`;
+  info.actual.shadowCasterGeometry =
+    `uv-sphere:${S.casterWidthSegments}x${S.casterHeightSegments}`;
+  info.actual.shadowTrianglesPerCaster = caster.triangleCount;
+  info.actual.shadowInstanced = true;
+  info.actual.expectedShadowDrawCalls = shadowLights.length + 2;
+  info.actual.expectedShadowTriangles =
+    caster.triangleCount * shadowLayout.items.length * (shadowLights.length + 1) + 12;
+  info.actual.totalTriangles = caster.triangleCount * shadowLayout.items.length;
+  info.actual.vertexCountPerMesh = caster.vertexCount;
+}
+
+// ---- Default frustum culling ----
+const visibilityObjects = [];
+if (params.visibilityObjects > 0) {
+  const mat = new BABYLON.PBRMaterial('visibilityMat', scene);
+  mat.albedoColor = new BABYLON.Color3(0.44, 0.65, 0.78);
+  mat.metallic = 0; mat.roughness = 1;
+  const { box, src } = createBoxSource('visibility0', mat);
+  const layout = buildVisibilityLayout(params.visibilityObjects, params.visibleFraction);
+  for (const it of layout.items) {
+    const mesh = it.i === 0 ? src : src.clone('visibility' + it.i, null, true);
+    mesh.position.set(it.x, it.y, it.z);
+    mesh.scaling.setAll(it.scale);
+    visibilityObjects.push(mesh);
+  }
+  info.actual.visibilityObjects = visibilityObjects.length;
+  info.actual.expectedVisibleObjects = layout.visibleCount;
+  info.actual.visibleFraction = layout.visibleFraction;
+  info.actual.cullingPolicy = 'standard bounding-info frustum culling(default)';
+  info.actual.totalTriangles = box.triangleCount * visibilityObjects.length;
+  info.actual.vertexCountPerMesh = box.vertexCount;
+}
+
+// ---- CPU AABB ray queries ----
+let raycastHits = 0;
+let raycastExpectedHits = 0;
+const raycastBoxes = [];
+const raycastRays = [];
+if (params.raycastTargets > 0 && params.raycasts > 0) {
+  const layout = buildRaycastLayout(params.raycastTargets, params.raycasts);
+  for (const t of layout.targets) {
+    raycastBoxes.push({
+      min: new BABYLON.Vector3(t.x - t.hx, t.y - t.hy, t.z - t.hz),
+      max: new BABYLON.Vector3(t.x + t.hx, t.y + t.hy, t.z + t.hz),
+    });
+  }
+  for (const r of layout.rays) {
+    raycastRays.push(new BABYLON.Ray(
+      new BABYLON.Vector3(r.ox, r.oy, r.oz),
+      new BABYLON.Vector3(r.dx, r.dy, r.dz),
+      100));
+  }
+  raycastExpectedHits = layout.expectedHits;
+  info.actual.raycastTargets = layout.targetCount;
+  info.actual.raycasts = layout.rayCount;
+  info.actual.raycastExpectedHits = layout.expectedHits;
+  info.actual.raycastPolicy = 'linear BABYLON.Ray.intersectsBoxMinMax';
 }
 
 // ---- Physics: Havok ----
@@ -254,10 +431,12 @@ if (params.coverage > 0) {
   info.actual.vertexCountPerMesh = 4;
 }
 
-info.actual.objects = objects.length;
-info.actual.instances = objectCount;
-info.actual.lights = lights.length;
-info.actual.lightPolicy = `maxSimultaneousLights=${info.defaults.maxSimultaneousLights ?? 'n/a'}(default)`;
+info.actual.objects = objects.length + (shadowLayout?.items.length ?? 0) + visibilityObjects.length;
+info.actual.instances = objectCount + (shadowLayout?.items.length ?? 0) + visibilityObjects.length;
+info.actual.lights = lights.length + shadowLights.length;
+info.actual.lightPolicy = params.shadowCasters > 0
+  ? `forward(maxSimultaneousLights=${params.shadowLights + 1})`
+  : `maxSimultaneousLights=${info.defaults.maxSimultaneousLights ?? 'n/a'}(default)`;
 info.defaults.parallelShaderCompile = !!engine.getCaps().parallelShaderCompile;
 info.defaults.useReverseDepthBuffer = engine.useReverseDepthBuffer;
 
@@ -265,7 +444,9 @@ info.defaults.useReverseDepthBuffer = engine.useReverseDepthBuffer;
 state.assetsLoaded = true;
 info.timings.assetsLoadedMs = performance.now();
 {
-  const c0 = cameraAt(0, params.bodies > 0 ? 'physics' : null);
+  const cameraPreset = params.bodies > 0 ? 'physics'
+    : ((params.visibilityObjects > 0 || params.raycasts > 0) ? 'visibility' : null);
+  const c0 = cameraAt(0, cameraPreset);
   camera.position.set(c0.x, c0.y, c0.z);
   camera.setTarget(new BABYLON.Vector3(c0.tx, c0.ty, c0.tz));
   // Keep rendering while asynchronous shader preparation settles.
@@ -284,7 +465,9 @@ info.timings.assetsLoadedMs = performance.now();
 function engineTick(t, dt) {
   // Keep camera and light inputs fixed during the PBR pixel case.
   const sceneTime = params.coverage > 0 ? 0 : t;
-  const c = cameraAt(sceneTime, params.bodies > 0 ? 'physics' : null);
+  const cameraPreset = params.bodies > 0 ? 'physics'
+    : ((params.visibilityObjects > 0 || params.raycasts > 0) ? 'visibility' : null);
+  const c = cameraAt(sceneTime, cameraPreset);
   camera.position.set(c.x, c.y, c.z);
   camera.setTarget(new BABYLON.Vector3(c.tx, c.ty, c.tz));
 
@@ -295,6 +478,7 @@ function engineTick(t, dt) {
       o.rotation.y = d.rotationY + t * 0.0005;
       o.position.y = d.y + Math.sin(t * 0.002 + d.phase) * 0.6;
     }
+    updateShadowInstances(t);
     if (params.coverage > 0 && overdrawQuads.length) {
       for (const m of overdrawQuads) {
         const q = m._od;
@@ -312,6 +496,13 @@ function engineTick(t, dt) {
     if (havokEnabled) {
       physicsClock.advance(dt, (step) => scene._advancePhysicsEngineStep(step * 1000));
     }
+  }
+  if (raycastRays.length) {
+    let hits = 0;
+    for (const ray of raycastRays) {
+      for (const box of raycastBoxes) if (ray.intersectsBoxMinMax(box.min, box.max)) hits++;
+    }
+    raycastHits = hits;
   }
   scene.render();
 }
@@ -342,6 +533,10 @@ runLoop({
       activeIndices: scene.getActiveIndices(),
     };
     if (physicsClock.totalSteps) info.actual.physSteps = physicsClock.totalSteps;
+    if (raycastRays.length) {
+      info.actual.raycastHits = raycastHits;
+      info.actual.raycastParity = raycastHits === raycastExpectedHits;
+    }
     if (performance.memory) info.jsHeapMB = performance.memory.usedJSHeapSize / 1048576;
     hud.textContent = `babylon done  ${info.frame.frameCount}f p95=${info.frame.p95?.toFixed(1)}ms`
       + `\ndraw=${info.probe?.drawCalls} tri=${info.probe?.triangles}`;
