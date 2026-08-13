@@ -15,7 +15,8 @@ The project provides a reproducible comparison of the default behavior of
 The benchmark uses common game workloads without engine-specific optimization. Scene inputs are aligned, while
 each engine keeps its default lighting, material, culling, color, and object-management behavior.
 
-Read the current interpretation of the results in **[CONCLUSION.md](./CONCLUSION.md)**.
+Read the current interpretation of the results in **[English](./CONCLUSION.md)** or
+**[简体中文](./CONCLUSION.zh-CN.md)**.
 
 ## Test Cases
 
