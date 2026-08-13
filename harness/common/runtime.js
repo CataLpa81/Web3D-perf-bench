@@ -24,9 +24,12 @@ export function readParams(search = location.search) {
     minGpuFrames: num('minGpuFrames', 0),
     maxDurationMs: num('maxDurationMs', 0),
     // Sliding-window convergence replaces a fixed warmup.
-    steadyWindow: num('steadyWindow', 60),
+    steadyWindow: num('steadyWindow', 30),
+    steadyWindows: num('steadyWindows', 3),
     steadyTolerance: num('steadyTolerance', 0.05),
-    maxWarmupMs: num('maxWarmupMs', 0) || 8000,
+    steadyAbsoluteToleranceMs: num('steadyAbsoluteToleranceMs', 0.2),
+    minWarmupMs: num('minWarmupMs', 2000),
+    maxWarmupMs: num('maxWarmupMs', 0) || 30000,
   };
 }
 
@@ -122,16 +125,23 @@ export function measureFramebufferCoverage(canvas, clearColor) {
   }
 }
 
-export function detectGpu() {
+export function detectGpu(context = null) {
   try {
-    const c = document.createElement('canvas');
-    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    const c = context ? null : document.createElement('canvas');
+    const gl = context || c.getContext('webgl2') || c.getContext('webgl');
     if (!gl) return { ok: false, renderer: null, reason: 'no-webgl' };
     const ext = gl.getExtension('WEBGL_debug_renderer_info');
     const renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null;
     const vendor = ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : null;
     const soft = /swiftshader|software|llvmpipe|angle \(google/i.test(String(renderer || ''));
-    return { ok: !!renderer && !soft, renderer, vendor, software: soft };
+    return {
+      ok: !!renderer && !soft,
+      renderer,
+      vendor,
+      software: soft,
+      webgl2: typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext,
+      antialias: gl.getContextAttributes?.().antialias ?? null,
+    };
   } catch (e) {
     return { ok: false, renderer: null, reason: String(e) };
   }
@@ -155,7 +165,7 @@ function summarizeTimings(samples) {
 }
 
 // GPU timing for asynchronous WebGL work.
-export function createGpuTimer(gl, { maxPending = 64 } = {}) {
+export function createGpuTimer(gl, { maxPending = 8 } = {}) {
   const ext = gl?.getExtension?.('EXT_disjoint_timer_query_webgl2');
   const supported = !!(ext && gl.createQuery && gl.beginQuery && gl.endQuery);
   const pending = [];
@@ -216,6 +226,14 @@ export function createGpuTimer(gl, { maxPending = 64 } = {}) {
       active = null;
       poll();
     },
+    async waitForPending() {
+      if (!supported) return;
+      while (pending.length) {
+        poll();
+        if (!pending.length) break;
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    },
     result() {
       poll();
       return {
@@ -254,48 +272,28 @@ export function inspectActiveSamplers(gl) {
   }
 }
 
-// Frame recording and sliding-window convergence.
-function createFrameRecorder(opts) {
-  const { steadyWindow, steadyTolerance, maxWarmupMs } = opts;
+function percentile(arr, p) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.ceil((p / 100) * s.length) - 1)];
+}
+
+function createTimingRecorder() {
   const all = [];
   const steady = [];
-  let lastWindowP95 = null;
-  let steadyReached = false;
-  let steadyAtMs = null;
-  let elapsed = 0;
-
-  function pctile(arr, p) {
-    if (!arr.length) return null;
-    const s = [...arr].sort((a, b) => a - b);
-    return s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))];
-  }
+  let rejected = 0;
 
   return {
-    push(dtMs) {
-      // Reject burst callbacks and suspended-page outliers.
-      if (!(dtMs >= 0.4 && dtMs < 5000)) return;
-      all.push(dtMs);
-      elapsed += dtMs;
-      if (steadyReached) { steady.push(dtMs); return; }
-      // Check convergence after each full window.
-      if (all.length % steadyWindow === 0) {
-        const w = all.slice(-steadyWindow);
-        const p95 = pctile(w, 95);
-        if (lastWindowP95 != null) {
-          const change = Math.abs(p95 - lastWindowP95) / lastWindowP95;
-          if (change < steadyTolerance) {
-            steadyReached = true; steadyAtMs = elapsed;
-          }
-        }
-        lastWindowP95 = p95;
+    push(value, isSteady) {
+      if (!(value >= 0 && value < 5000)) {
+        rejected++;
+        return;
       }
-      // Force steady state after the warmup ceiling.
-      if (!steadyReached && elapsed > maxWarmupMs) { steadyReached = true; steadyAtMs = elapsed; }
+      all.push(value);
+      if (isSteady) steady.push(value);
     },
-    get steadyReached() { return steadyReached; },
     get steadyFrameCount() { return steady.length; },
-    get elapsedMs() { return elapsed; },
-    result() {
+    result(steadyAtMs) {
       const use = steady.length >= 30 ? steady : all;
       const sum = use.reduce((a, b) => a + b, 0);
       const mean = use.length ? sum / use.length : null;
@@ -304,12 +302,15 @@ function createFrameRecorder(opts) {
       return {
         frameCount: use.length,
         totalFrameCount: all.length,
+        steadyFrameCount: steady.length,
         usedSteadyWindow: steady.length >= 30,
         steadyAtMs,
-        p50: pctile(use, 50), p95: pctile(use, 95), p99: pctile(use, 99),
+        p50: percentile(use, 50), p95: percentile(use, 95), p99: percentile(use, 99),
         max: use.length ? Math.max(...use) : null,
+        mean,
         avgFps: mean ? 1000 / mean : null,
         stddev: varr != null ? Math.sqrt(varr) : null,
+        rejectedSamples: rejected,
         framesOver2Vsync: use.filter(f => f > v60 * 2).length / (use.length || 1),
         framesOver4Vsync: use.filter(f => f > v60 * 4).length,
       };
@@ -317,11 +318,63 @@ function createFrameRecorder(opts) {
   };
 }
 
+function createSteadyDetector(opts) {
+  const {
+    steadyWindow,
+    steadyWindows,
+    steadyTolerance,
+    steadyAbsoluteToleranceMs,
+    minWarmupMs,
+    maxWarmupMs,
+  } = opts;
+  const samples = [];
+  const windowP95s = [];
+  let elapsedMs = 0;
+  let steadyReached = false;
+  let converged = false;
+  let forced = false;
+  let steadyAtMs = null;
+
+  return {
+    push(cpuMs, intervalMs) {
+      if (steadyReached) return;
+      elapsedMs += Math.max(0, intervalMs);
+      if (Number.isFinite(cpuMs)) samples.push(cpuMs);
+      if (samples.length > 0 && samples.length % steadyWindow === 0) {
+        windowP95s.push(percentile(samples.slice(-steadyWindow), 95));
+        if (windowP95s.length > steadyWindows) windowP95s.shift();
+        if (elapsedMs >= minWarmupMs && windowP95s.length === steadyWindows) {
+          const lo = Math.min(...windowP95s);
+          const hi = Math.max(...windowP95s);
+          if (lo > 0 && (hi - lo) <= Math.max(lo * steadyTolerance, steadyAbsoluteToleranceMs)) {
+            steadyReached = true;
+            converged = true;
+            steadyAtMs = elapsedMs;
+          }
+        }
+      }
+      if (!steadyReached && elapsedMs >= maxWarmupMs) {
+        steadyReached = true;
+        forced = true;
+        steadyAtMs = elapsedMs;
+      }
+    },
+    get reached() { return steadyReached; },
+    get converged() { return converged; },
+    get forced() { return forced; },
+    get steadyAtMs() { return steadyAtMs; },
+    get elapsedMs() { return elapsedMs; },
+    get windowP95s() { return [...windowP95s]; },
+  };
+}
+
 // Shared update and render loop.
 export function runLoop({
   state, info, params, engineTick, gpuTimer = null, onFinish,
 }) {
-  const rec = createFrameRecorder(params);
+  const intervalRec = createTimingRecorder();
+  const cpuRec = createTimingRecorder();
+  const steadyDetector = createSteadyDetector(params);
   if (gpuTimer) info.gpuFrame = gpuTimer.result();
   let startT = null, last = null, frames = 0;
   let probeArmed = false, probeCaptured = false;
@@ -330,22 +383,43 @@ export function runLoop({
   let liveAt = 0;
   window.__LIVE__ = { p95: null, p50: null, fps: null, frames: 0 };
 
-  function frame(now) {
+  async function frame(now) {
     if (startT === null) { startT = now; last = now; }
     const t = now - startT;
     const dt = now - last;
     last = now;
+    const wasSteady = steadyDetector.reached;
+
+    if (wasSteady && !probeCaptured) {
+      if (!probeArmed) { resetProbe(); probeArmed = true; }
+      else { info.probe = readProbe(); probeCaptured = true; state.steadyReached = true; }
+    }
+
+    let cpuMs;
+    try {
+      gpuTimer?.begin(wasSteady);
+      const cpuStart = performance.now();
+      engineTick(t, dt);
+      cpuMs = performance.now() - cpuStart;
+      gpuTimer?.end();
+      await gpuTimer?.waitForPending();
+    } catch (e) {
+      state.error = String(e && e.message || e);
+      state.scenarioCompleted = true;
+      return;
+    }
     if (frames > 0) {
-      rec.push(dt);
-      live.push(dt);
+      steadyDetector.push(cpuMs, dt);
+      intervalRec.push(dt, wasSteady);
+      cpuRec.push(cpuMs, wasSteady);
+      live.push(cpuMs);
       if (live.length > 120) live.shift();
       if (now - liveAt > 500 && live.length > 10) {
         liveAt = now;
-        const srt = [...live].sort((a, b) => a - b);
         const mean = live.reduce((a, b) => a + b, 0) / live.length;
         window.__LIVE__ = {
-          p95: srt[Math.floor(0.95 * srt.length)],
-          p50: srt[Math.floor(0.5 * srt.length)],
+          p95: percentile(live, 95),
+          p50: percentile(live, 50),
           fps: 1000 / mean,
           frames,
         };
@@ -357,22 +431,6 @@ export function runLoop({
         }
       }
     }
-
-    // Capture one clean probe frame after convergence.
-    if (rec.steadyReached && !probeCaptured) {
-      if (!probeArmed) { resetProbe(); probeArmed = true; }
-      else { info.probe = readProbe(); probeCaptured = true; state.steadyReached = true; }
-    }
-
-    try {
-      gpuTimer?.begin(rec.steadyReached);
-      engineTick(t, dt);
-      gpuTimer?.end();
-    } catch (e) {
-      state.error = String(e && e.message || e);
-      state.scenarioCompleted = true;
-      return;
-    }
     frames++;
 
     if (frames === 1) {
@@ -383,8 +441,8 @@ export function runLoop({
     }
 
     // Finish after both duration and sample targets, or at the hard ceiling.
-    const maxMs = params.maxDurationMs || params.durationMs * 4;
-    const enoughCpuSamples = rec.steadyFrameCount >= (params.minSteadyFrames || 0);
+    const maxMs = params.maxDurationMs || Math.max(params.durationMs * 4, 120000);
+    const enoughCpuSamples = cpuRec.steadyFrameCount >= (params.minSteadyFrames || 0);
     const enoughGpuSamples = !gpuTimer?.supported
       || gpuTimer.sampleCount >= (params.minGpuFrames || 0);
     const enoughSamples = enoughCpuSamples && enoughGpuSamples;
@@ -393,7 +451,11 @@ export function runLoop({
       info.extendedBeyondDuration = t > params.durationMs * 1.05;
       info.hitDurationCeiling = hitCeiling && !enoughSamples;
       info.actualDurationMs = t;
-      info.frame = rec.result();
+      info.frame = intervalRec.result(steadyDetector.steadyAtMs);
+      info.cpuFrame = cpuRec.result(steadyDetector.steadyAtMs);
+      info.steadyConverged = steadyDetector.converged;
+      info.steadyForced = steadyDetector.forced;
+      info.steadyWindowsP95 = steadyDetector.windowP95s;
       if (gpuTimer) info.gpuFrame = gpuTimer.result();
       info.timings.endMs = performance.now();
       // Always return a probe result.

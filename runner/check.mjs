@@ -3,7 +3,8 @@ import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { CASES, DEFAULTS } from '../spec/cases.js';
+import { CASES, DEFAULTS, interpolateCapacity } from '../spec/cases.js';
+import { buildGridForTotalTriangles } from '../spec/scene-spec.js';
 import { ROOT, startServer } from './server.mjs';
 
 const scripts = [
@@ -46,6 +47,49 @@ for (const [id, testCase] of Object.entries(CASES)) {
   for (const key of Object.keys(testCase.fixed || {})) {
     if (!(key in DEFAULTS)) throw new Error(`${id}: unknown fixed parameter ${key}`);
   }
+}
+
+for (const caseId of ['lights', 'lights-forward', 'drawcalls']) {
+  const testCase = CASES[caseId];
+  for (const count of testCase.ladder) {
+    const objects = testCase.axis === 'objects' ? count : testCase.fixed.objects;
+    const grid = buildGridForTotalTriangles(testCase.fixed.triangles, objects);
+    if (grid.triangleCount * objects !== testCase.fixed.triangles) {
+      throw new Error(`${caseId}@${count}: triangle total is not exact`);
+    }
+  }
+}
+
+const bounded = interpolateCapacity([
+  { value: 100, p95: 10 },
+  { value: 200, p95: 20 },
+], 16.67);
+if (bounded.status !== 'bounded' || bounded.capacity !== 100) {
+  throw new Error('capacity must report a tested bound without interpolation');
+}
+const nonmonotonic = interpolateCapacity([
+  { value: 100, p95: 10 },
+  { value: 200, p95: 20 },
+  { value: 400, p95: 12 },
+], 16.67);
+if (nonmonotonic.status !== 'nonmonotonic') {
+  throw new Error('capacity must reject materially non-monotonic ladders');
+}
+const invalidBound = interpolateCapacity([
+  { value: 100, p95: 10, complete: true },
+  { value: 200, p95: null, complete: false },
+  { value: 400, p95: 12, complete: true },
+], 16.67);
+if (invalidBound.status !== 'bounded-invalid' || invalidBound.capacity !== 100) {
+  throw new Error('capacity must stop at the first incomplete rung');
+}
+const completedBoundBeforeInvalid = interpolateCapacity([
+  { value: 100, p95: 10, complete: true },
+  { value: 200, p95: 20, complete: true },
+  { value: 400, p95: null, complete: false },
+], 16.67);
+if (completedBoundBeforeInvalid.status !== 'bounded' || completedBoundBeforeInvalid.capacity !== 100) {
+  throw new Error('a later incomplete rung must not erase an established tested bound');
 }
 
 for (const file of [

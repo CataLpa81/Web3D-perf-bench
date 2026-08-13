@@ -23,9 +23,9 @@
 <script type="module">
 // Install the WebGL probe before the engine acquires a context.
 import '/harness/common/probe.js';
-import { createHarness, createFixedStepClock, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
+import { createHarness, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
 import { cameraAt } from '/spec/contract.js';
-import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildBox, buildUvSphere, buildShadowLayout, buildShadowLightLayout, shadowCasterLayoutSignature, shadowLightLayoutSignature, buildVisibilityLayout, buildRaycastLayout, buildPhysicsLayout } from '/spec/scene-spec.js';
+import { buildGridForTotalTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildBox, buildUvSphere, buildShadowLayout, buildShadowLightLayout, shadowCasterLayoutSignature, shadowLightLayoutSignature, buildVisibilityLayout, buildRaycastLayout, buildPhysicsLayout } from '/spec/scene-spec.js';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
@@ -44,6 +44,8 @@ canvas.style.height = CONTRACT.viewport.h + 'px';
 
 // ---- Engine initialization ----
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: CONTRACT.antialias });
+info.gpu = detectGpu(renderer.getContext());
+info.actual.antialiasEnabled = renderer.getContext().getContextAttributes().antialias;
 renderer.setPixelRatio(CONTRACT.devicePixelRatio);
 renderer.setSize(CONTRACT.viewport.w, CONTRACT.viewport.h, false);
 const gpuTimer = (params.coverage > 0 || params.shadowCasters > 0)
@@ -58,7 +60,6 @@ const camera = new THREE.PerspectiveCamera(
 info.defaults = {
   toneMapping: renderer.toneMapping,
   outputColorSpace: renderer.outputColorSpace,
-  useLegacyLights: renderer.useLegacyLights ?? null,
 };
 {
   const gl = renderer.getContext();
@@ -95,8 +96,7 @@ const objects = [];
 let sharedGeo = null;
 const objectCount = params.objects;
 if (objectCount > 0) {
-  const seg = segForTriangles(params.triangles, objectCount);
-  const grid = buildGrid(seg);
+  const grid = buildGridForTotalTriangles(params.triangles, objectCount);
   sharedGeo = new THREE.BufferGeometry();
   sharedGeo.setAttribute('position', new THREE.BufferAttribute(grid.positions, 3));
   sharedGeo.setAttribute('normal', new THREE.BufferAttribute(grid.normals, 3));
@@ -111,11 +111,14 @@ if (objectCount > 0) {
     mesh.rotation.y = it.rotationY;
     mesh.scale.setScalar(it.scale);
     mesh.userData = it;
+    if (params.caseId === 'drawcalls') mesh.frustumCulled = false;
     scene.add(mesh);
     objects.push(mesh);
   }
   info.actual.triangleCountPerMesh = grid.triangleCount;
-  info.actual.seg = seg;
+  info.actual.gridSegments = `${grid.segX}x${grid.segY}`;
+  info.actual.geometrySharing = 'shared-single-buffer';
+  info.actual.uniqueGeometryResources = new Set(objects.map(mesh => mesh.geometry)).size;
   info.actual.totalTriangles = grid.triangleCount * objectCount;
   info.actual.vertexCountPerMesh = grid.vertexCount;
 }
@@ -230,7 +233,7 @@ if (params.shadowCasters > 0) {
 const visibilityObjects = [];
 if (params.visibilityObjects > 0) {
   const { box, geo } = makeBoxGeometry();
-  const layout = buildVisibilityLayout(params.visibilityObjects, params.visibleFraction);
+  const layout = buildVisibilityLayout(params.visibilityObjects, { visibleCount: params.visibleCount });
   const mat = new THREE.MeshStandardMaterial({ color: 0x70a6c8 });
   for (const it of layout.items) {
     const mesh = new THREE.Mesh(geo, mat);
@@ -275,7 +278,7 @@ if (params.raycastTargets > 0 && params.raycasts > 0) {
 const physBodies = [];
 let rapierWorld = null;
 const PHYS_DT = 1 / 60;
-const physicsClock = createFixedStepClock({ stepSeconds: PHYS_DT });
+let physicsSteps = 0;
 let physInstMesh = null;
 const physMat = new THREE.Matrix4(), physQuat = new THREE.Quaternion();
 const physVec = new THREE.Vector3(), physScale = new THREE.Vector3(1, 1, 1);
@@ -307,13 +310,21 @@ if (params.bodies > 0) {
     const body = rapierWorld.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(it.x, it.y, it.z)
-        .setLinvel(it.vx, 0, it.vz));
+        .setLinvel(it.vx, 0, it.vz)
+        .setCanSleep(false));
     rapierWorld.createCollider(RAPIER.ColliderDesc.cuboid(h, h, h), body);
     physBodies.push({ body, idx: physBodies.length });
   }
   info.actual.bodies = physBodies.length;
   info.actual.physicsEngine = 'Rapier ' + (RAPIER.version?.() ?? '');
   info.actual.physFixedStep = PHYS_DT;
+  info.actual.physStepsPerFrame = 1;
+  info.actual.physicsSleepingAllowed = false;
+  info.actual.physicsInstanced = true;
+  info.actual.expectedPhysicsDrawCalls = 2;
+  info.actual.expectedPhysicsTriangles = L.items.length * 12 + 12;
+  info.actual.totalTriangles = L.items.length * 12;
+  info.actual.vertexCountPerMesh = 24;
 }
 
 // ---- Skeletal animation ----
@@ -325,6 +336,9 @@ if (params.skinned > 0) {
   const layout = buildObjectLayout(params.skinned, { scale: 1.0 });
   for (const it of layout) {
     const root = cloneSkeleton(gltf.scene);
+    root.traverse(node => {
+      if (node.isMesh) node.frustumCulled = false;
+    });
     root.position.set(it.x, 0, it.z);
     root.rotation.y = it.rotationY;
     scene.add(root);
@@ -339,6 +353,9 @@ if (params.skinned > 0) {
   info.actual.skinned = skinnedChars.length;
   info.actual.bonesPerChar = gltf.scene.getObjectByProperty('isSkinnedMesh', true)?.skeleton?.bones?.length ?? null;
   info.actual.animChannels = gltf.animations[0].tracks.length;
+  info.actual.expectedSkinnedDrawCalls = skinnedChars.length;
+  info.actual.expectedSkinnedTriangles = skinnedChars.length * 4672;
+  info.actual.totalTriangles = info.actual.expectedSkinnedTriangles;
 }
 
 // ---- overdraw ----
@@ -458,9 +475,9 @@ function engineTick(t, dt) {
         l.position.z = Math.sin(ang) * d.orbit;
       }
     }
-    // All harnesses use the same wall-clock accumulator and 1/60 fixed step.
     if (rapierWorld && params.animate) {
-      physicsClock.advance(dt, () => rapierWorld.step());
+      rapierWorld.step();
+      physicsSteps++;
       for (const { body, idx } of physBodies) {
         const t = body.translation(), r = body.rotation();
         physQuat.set(r.x, r.y, r.z, r.w);
@@ -491,6 +508,12 @@ window.__SCENE_REFS__ = { THREE, scene, camera, renderer, physBodies, rapierWorl
 runLoop({
   state, info, params, engineTick, gpuTimer,
   onFinish() {
+    if (shadowLights.length) {
+      const sizes = shadowLights.map(light => light.shadow.map?.width).filter(Number.isFinite);
+      info.actual.shadowMapSize = sizes[0] ?? null;
+      info.actual.shadowMaps = new Set(shadowLights.map(light => light.shadow.map?.texture).filter(Boolean)).size;
+      info.actual.shadowNear = shadowLights[0].shadow.camera.near;
+    }
     info.framebufferCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
     if (overdrawMaterial) info.actual.overdrawActiveSamplers = inspectActiveSamplers(renderer.getContext());
     if (overdrawMaterial) {
@@ -511,7 +534,11 @@ runLoop({
       geometries: renderer.info.memory.geometries,
       textures: renderer.info.memory.textures,
     };
-    if (physicsClock.totalSteps) info.actual.physSteps = physicsClock.totalSteps;
+    if (physicsSteps) {
+      info.actual.physSteps = physicsSteps;
+      info.actual.physicsSleepingBodies = physBodies.reduce(
+        (count, entry) => count + (entry.body.isSleeping() ? 1 : 0), 0);
+    }
     if (raycastRays.length) {
       info.actual.raycastHits = raycastHits;
       info.actual.raycastParity = raycastHits === raycastExpectedHits;

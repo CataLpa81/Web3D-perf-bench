@@ -17,9 +17,9 @@
 <canvas id="c"></canvas>
 <script type="module">
 import '/harness/common/probe.js';
-import { createHarness, createFixedStepClock, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
+import { createHarness, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
 import { cameraAt } from '/spec/contract.js';
-import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildBox, buildUvSphere, buildShadowLayout, buildShadowLightLayout, shadowCasterLayoutSignature, shadowLightLayoutSignature, buildVisibilityLayout, buildRaycastLayout, buildPhysicsLayout } from '/spec/scene-spec.js';
+import { buildGridForTotalTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildBox, buildUvSphere, buildShadowLayout, buildShadowLightLayout, shadowCasterLayoutSignature, shadowLightLayoutSignature, buildVisibilityLayout, buildRaycastLayout, buildPhysicsLayout } from '/spec/scene-spec.js';
 
 const params = readParams();
 const { state, info } = createHarness('babylon');
@@ -35,6 +35,8 @@ canvas.style.height = CONTRACT.viewport.h + 'px';
 
 // ---- Engine initialization ----
 const engine = new BABYLON.Engine(canvas, CONTRACT.antialias);
+info.gpu = detectGpu(engine._gl);
+info.actual.antialiasEnabled = engine._gl.getContextAttributes().antialias;
 engine.setHardwareScalingLevel(1 / CONTRACT.devicePixelRatio);
 const gpuTimer = (params.coverage > 0 || params.shadowCasters > 0)
   ? createGpuTimer(engine._gl) : null;
@@ -84,37 +86,47 @@ for (const L of buildLightLayout(params.lights)) {
 const objects = [];
 const objectCount = params.objects;
 if (objectCount > 0) {
-  const seg = segForTriangles(params.triangles, objectCount);
   // Flip winding for Babylon's right-handed front-face convention.
-  const grid = buildGrid(seg, true);
+  const grid = buildGridForTotalTriangles(params.triangles, objectCount, true);
   const mat = new BABYLON.PBRMaterial('mat', scene);
   mat.albedoColor = new BABYLON.Color3(0.69, 0.74, 0.78);
   mat.metallic = 0; mat.roughness = 1;
   const layout = buildObjectLayout(objectCount);
 
-  const applyVertexData = (mesh) => {
-    const vd = new BABYLON.VertexData();
-    vd.positions = grid.positions; vd.normals = grid.normals;
-    vd.uvs = grid.uvs; vd.indices = grid.indices;
-    vd.applyToMesh(mesh);
-  };
-
+  let source = null;
   for (const it of layout) {
-    const mesh = new BABYLON.Mesh('obj' + it.i, scene);
-    applyVertexData(mesh);
-    mesh.material = mat;
+    let mesh;
+    if (!source) {
+      source = new BABYLON.Mesh('obj0', scene);
+      const vd = new BABYLON.VertexData();
+      vd.positions = grid.positions; vd.normals = grid.normals;
+      vd.uvs = grid.uvs; vd.indices = grid.indices;
+      vd.applyToMesh(source);
+      source.material = mat;
+      mesh = source;
+    } else {
+      // Mesh clones share Geometry but remain independent draw submissions.
+      mesh = source.clone('obj' + it.i, null, true);
+    }
     mesh.position = new BABYLON.Vector3(it.x, it.y, it.z);
     mesh.rotation = new BABYLON.Vector3(0, it.rotationY, 0);
     mesh.scaling = new BABYLON.Vector3(it.scale, it.scale, it.scale);
     mesh._layout = it;
+    if (params.caseId === 'drawcalls') mesh.alwaysSelectAsActiveMesh = true;
     objects.push(mesh);
   }
   info.actual.triangleCountPerMesh = grid.triangleCount;
-  info.actual.seg = seg;
+  info.actual.gridSegments = `${grid.segX}x${grid.segY}`;
+  info.actual.geometrySharing = 'shared-single-geometry';
+  info.actual.uniqueGeometryResources = new Set(objects.map(mesh => mesh.geometry)).size;
   info.actual.totalTriangles = grid.triangleCount * objectCount;
   info.actual.vertexCountPerMesh = grid.vertexCount;
   // Record the default without changing it.
   info.defaults.maxSimultaneousLights = mat.maxSimultaneousLights;
+  if (params.caseId === 'lights-forward') {
+    mat.maxSimultaneousLights = params.lights + 1;
+    info.defaults.maxSimultaneousLights = mat.maxSimultaneousLights;
+  }
 }
 
 const createBoxSource = (name, material) => {
@@ -249,7 +261,7 @@ if (params.visibilityObjects > 0) {
   mat.albedoColor = new BABYLON.Color3(0.44, 0.65, 0.78);
   mat.metallic = 0; mat.roughness = 1;
   const { box, src } = createBoxSource('visibility0', mat);
-  const layout = buildVisibilityLayout(params.visibilityObjects, params.visibleFraction);
+  const layout = buildVisibilityLayout(params.visibilityObjects, { visibleCount: params.visibleCount });
   for (const it of layout.items) {
     const mesh = it.i === 0 ? src : src.clone('visibility' + it.i, null, true);
     mesh.position.set(it.x, it.y, it.z);
@@ -293,18 +305,23 @@ if (params.raycastTargets > 0 && params.raycasts > 0) {
 // ---- Physics: Havok ----
 const physBodies = [];
 let havokEnabled = false;
+let havokPlugin = null;
 const PHYS_DT = 1 / 60;
-const physicsClock = createFixedStepClock({ stepSeconds: PHYS_DT });
+let physicsSteps = 0;
+let physRenderSource = null;
+let physRenderData = null;
+const physRenderMatrix = new BABYLON.Matrix();
+const physRenderIdentityScale = new BABYLON.Vector3(1, 1, 1);
+const physRenderIdentityRotation = BABYLON.Quaternion.Identity();
 if (params.bodies > 0) {
   const HK = await import('/vendor/@babylonjs/havok/lib/esm/HavokPhysics_es.js');
   const havok = await HK.default({
     locateFile: () => '/vendor/@babylonjs/havok/lib/esm/HavokPhysics.wasm',
   });
   // The render-only baseline does not initialize Havok.
-  let plugin = null;
   if (params.animate) {
-    plugin = new BABYLON.HavokPlugin(true, havok);
-    scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), plugin);
+    havokPlugin = new BABYLON.HavokPlugin(true, havok);
+    scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), havokPlugin);
     havokEnabled = true;
   }
 
@@ -324,25 +341,47 @@ if (params.bodies > 0) {
   bm.albedoColor = new BABYLON.Color3(0.75, 0.50, 0.31);
   bm.metallic = 0; bm.roughness = 1;
   src.material = bm;
-  // Disable per-instance culling to match the single instanced submission path.
-  src.alwaysSelectAsActiveMesh = true;
+  src.isVisible = false;
   for (const it of L.items) {
     const m = it.i === 0 ? src : src.createInstance('pb' + it.i);
-    m.alwaysSelectAsActiveMesh = true;
+    m.isVisible = false;
     m.position = new BABYLON.Vector3(it.x, it.y, it.z);
     if (havokEnabled) {
       const agg = new BABYLON.PhysicsAggregate(m, BABYLON.PhysicsShapeType.BOX, { mass: it.mass }, scene);
+      havokPlugin.setActivationControl(agg.body, BABYLON.PhysicsActivationControl.ALWAYS_ACTIVE);
       agg.body.setLinearVelocity(new BABYLON.Vector3(it.vx, 0, it.vz));
-      physBodies.push(agg);
+      physBodies.push({ aggregate: agg, node: m });
     } else {
-      physBodies.push({ transformNode: m });
+      physBodies.push({ aggregate: null, node: m });
     }
   }
-  // Disable automatic physics advancement and use the shared fixed-step clock.
+  physRenderSource = BABYLON.MeshBuilder.CreateBox('physicsRender', { size: L.size }, scene);
+  physRenderSource.material = bm;
+  physRenderSource.alwaysSelectAsActiveMesh = true;
+  physRenderData = new Float32Array(L.items.length * 16);
+  for (let i = 0; i < L.items.length; i++) {
+    const node = physBodies[i].node;
+    BABYLON.Matrix.ComposeToRef(
+      physRenderIdentityScale,
+      node.rotationQuaternion || physRenderIdentityRotation,
+      node.position,
+      physRenderMatrix);
+    physRenderMatrix.copyToArray(physRenderData, i * 16);
+  }
+  physRenderSource.thinInstanceSetBuffer('matrix', physRenderData, 16, false);
+  physRenderSource.thinInstanceRefreshBoundingInfo(true);
+  // Disable automatic advancement; the benchmark performs one fixed step per rendered frame.
   if (havokEnabled) scene.physicsEnabled = false;
   info.actual.bodies = physBodies.length;
   info.actual.physicsEngine = 'Havok (@babylonjs/havok)';
   info.actual.physFixedStep = PHYS_DT;
+  info.actual.physStepsPerFrame = 1;
+  info.actual.physicsSleepingAllowed = false;
+  info.actual.physicsInstanced = true;
+  info.actual.expectedPhysicsDrawCalls = 2;
+  info.actual.expectedPhysicsTriangles = L.items.length * 12 + 12;
+  info.actual.totalTriangles = L.items.length * 12;
+  info.actual.vertexCountPerMesh = 24;
 }
 
 // ---- Skeletal animation ----
@@ -358,6 +397,7 @@ if (params.skinned > 0) {
     const root = inst.rootNodes[0];
     root.position = new BABYLON.Vector3(it.x, 0, it.z);
     root.rotation = new BABYLON.Vector3(0, it.rotationY, 0);
+    for (const mesh of root.getChildMeshes(false)) mesh.alwaysSelectAsActiveMesh = true;
     for (const g of inst.animationGroups) {
       // Offset animation phases across characters.
       g.goToFrame((it.i % 24) / 24 * (g.to - g.from) + g.from);
@@ -369,6 +409,9 @@ if (params.skinned > 0) {
   info.actual.skinned = skinnedChars.length;
   info.actual.bonesPerChar = container.skeletons[0]?.bones.length ?? null;
   info.actual.animChannels = srcGroup?.targetedAnimations.length ?? null;
+  info.actual.expectedSkinnedDrawCalls = skinnedChars.length;
+  info.actual.expectedSkinnedTriangles = skinnedChars.length * 4672;
+  info.actual.totalTriangles = info.actual.expectedSkinnedTriangles;
 }
 
 // ---- overdraw ----
@@ -436,7 +479,9 @@ info.actual.instances = objectCount + (shadowLayout?.items.length ?? 0) + visibi
 info.actual.lights = lights.length + shadowLights.length;
 info.actual.lightPolicy = params.shadowCasters > 0
   ? `forward(maxSimultaneousLights=${params.shadowLights + 1})`
-  : `maxSimultaneousLights=${info.defaults.maxSimultaneousLights ?? 'n/a'}(default)`;
+  : (params.caseId === 'lights-forward'
+      ? `forward-all(maxSimultaneousLights=${params.lights + 1})`
+      : `maxSimultaneousLights=${info.defaults.maxSimultaneousLights ?? 'n/a'}(default)`);
 info.defaults.parallelShaderCompile = !!engine.getCaps().parallelShaderCompile;
 info.defaults.useReverseDepthBuffer = engine.useReverseDepthBuffer;
 
@@ -494,7 +539,18 @@ function engineTick(t, dt) {
     }
     // Layers translate but do not rotate, preserving full-screen coverage.
     if (havokEnabled) {
-      physicsClock.advance(dt, (step) => scene._advancePhysicsEngineStep(step * 1000));
+      scene._advancePhysicsEngineStep(PHYS_DT * 1000);
+      physicsSteps++;
+      for (let i = 0; i < physBodies.length; i++) {
+        const node = physBodies[i].node;
+        BABYLON.Matrix.ComposeToRef(
+          physRenderIdentityScale,
+          node.rotationQuaternion || physRenderIdentityRotation,
+          node.position,
+          physRenderMatrix);
+        physRenderMatrix.copyToArray(physRenderData, i * 16);
+      }
+      physRenderSource.thinInstanceBufferUpdated('matrix');
     }
   }
   if (raycastRays.length) {
@@ -513,6 +569,13 @@ window.__SCENE_REFS__ = { BABYLON, scene, engine, camera, physBodies };
 runLoop({
   state, info, params, engineTick, gpuTimer,
   onFinish() {
+    if (shadowGenerators.length) {
+      const maps = shadowGenerators.map(generator => generator.getShadowMap());
+      const sizes = maps.map(map => map?.getSize?.().width).filter(Number.isFinite);
+      info.actual.shadowMapSize = sizes[0] ?? null;
+      info.actual.shadowMaps = new Set(maps.map(map => map?.renderTarget).filter(Boolean)).size || maps.length;
+      info.actual.shadowNear = shadowLights[0].shadowMinZ;
+    }
     info.framebufferCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
     if (overdrawMaterial) info.actual.overdrawActiveSamplers = inspectActiveSamplers(engine._gl);
     if (overdrawMaterial) {
@@ -532,7 +595,15 @@ runLoop({
       totalVertices: scene.getTotalVertices(),
       activeIndices: scene.getActiveIndices(),
     };
-    if (physicsClock.totalSteps) info.actual.physSteps = physicsClock.totalSteps;
+    if (physicsSteps) {
+      info.actual.physSteps = physicsSteps;
+      info.actual.physicsSleepingBodies = physBodies.reduce((count, entry) => {
+        const bodyId = entry.aggregate?.body?._pluginData?.hpBodyId;
+        if (bodyId == null) return count;
+        const [, activationState] = havokPlugin._hknp.HP_Body_GetActivationState(bodyId);
+        return count + (activationState.value === 0 ? 0 : 1);
+      }, 0);
+    }
     if (raycastRays.length) {
       info.actual.raycastHits = raycastHits;
       info.actual.raycastParity = raycastHits === raycastExpectedHits;

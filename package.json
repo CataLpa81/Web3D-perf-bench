@@ -10,7 +10,9 @@
   "scripts": {
     "bench": "node runner/open-bench.mjs",
     "server": "node runner/server.mjs",
-    "collect:quick": "node runner/collect.mjs",
+    "collect": "node runner/collect.mjs",
+    "collect:quick": "node runner/collect.mjs --duration=3000 --repeats=1 --min-frames=90",
+    "collect:reference": "node runner/collect.mjs --reference",
     "report": "node runner/report.mjs",
     "check": "node runner/check.mjs"
   },

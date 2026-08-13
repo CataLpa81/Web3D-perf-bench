@@ -25,7 +25,8 @@ export const CONTRACT = {
   visibilityCamera: { x: 0, y: 18, z: 42, target: { x: 0, y: 5, z: 0 } },
 
   shadow: {
-    near: 1,
+    // PlayCanvas derives local-light shadow near clip as range / 1000.
+    near: 0.08,
     far: 80,
     lightRadius: 18,
     lightHeight: 32,

@@ -18,9 +18,9 @@
 <canvas id="c"></canvas>
 <script type="module">
 import '/harness/common/probe.js';
-import { createHarness, createFixedStepClock, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
+import { createHarness, createGpuTimer, inspectActiveSamplers, readParams, detectGpu, runLoop, CONTRACT, measureFramebufferCoverage } from '/harness/common/runtime.js';
 import { cameraAt } from '/spec/contract.js';
-import { buildGrid, segForTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildBox, buildUvSphere, buildShadowLayout, buildShadowLightLayout, shadowCasterLayoutSignature, shadowLightLayoutSignature, buildVisibilityLayout, buildRaycastLayout, buildPhysicsLayout } from '/spec/scene-spec.js';
+import { buildGridForTotalTriangles, buildObjectLayout, buildLightLayout, buildOverdrawLayout, OVERDRAW_PBR_TEXTURES, OVERDRAW_ALPHA, buildQuad, buildBox, buildUvSphere, buildShadowLayout, buildShadowLightLayout, shadowCasterLayoutSignature, shadowLightLayoutSignature, buildVisibilityLayout, buildRaycastLayout, buildPhysicsLayout } from '/spec/scene-spec.js';
 import * as pc from 'playcanvas';
 
 const params = readParams();
@@ -42,6 +42,9 @@ const device = await pc.createGraphicsDevice(canvas, {
   deviceTypes: [pc.DEVICETYPE_WEBGL2],
   antialias: CONTRACT.antialias,
 });
+info.gpu = detectGpu(device.gl);
+info.actual.antialiasEnabled = device.backBufferAntialias && device.samples > 1;
+info.actual.antialiasSamples = device.samples;
 const gpuTimer = (params.coverage > 0 || params.shadowCasters > 0)
   ? createGpuTimer(device.gl) : null;
 device.maxPixelRatio = CONTRACT.devicePixelRatio;
@@ -61,7 +64,9 @@ info.defaults = {
   toneMapping: app.scene.rendering?.toneMapping ?? null,
   exposure: app.scene.exposure,
 };
-if (params.shadowCasters > 0) app.scene.clusteredLightingEnabled = false;
+if (params.shadowCasters > 0 || params.caseId === 'lights-forward') {
+  app.scene.clusteredLightingEnabled = false;
+}
 
 const cc = CONTRACT.clearColor;
 const camEnt = new pc.Entity('cam');
@@ -112,8 +117,7 @@ for (const L of buildLightLayout(params.lights)) {
 const objects = [];
 const objectCount = params.objects;
 if (objectCount > 0) {
-  const seg = segForTriangles(params.triangles, objectCount);
-  const grid = buildGrid(seg);
+  const grid = buildGridForTotalTriangles(params.triangles, objectCount);
   const mesh = new pc.Mesh(app.graphicsDevice);
   mesh.clear(false, false);
   mesh.setPositions(grid.positions);
@@ -129,6 +133,7 @@ if (objectCount > 0) {
 
   for (const it of layout) {
     const mi = new pc.MeshInstance(mesh, mat);
+    if (params.caseId === 'drawcalls') mi.cull = false;
     const ent = new pc.Entity('obj' + it.i);
     ent.addComponent('render', { meshInstances: [mi] });
     ent.setLocalPosition(it.x, it.y, it.z);
@@ -139,7 +144,10 @@ if (objectCount > 0) {
     objects.push(ent);
   }
   info.actual.triangleCountPerMesh = grid.triangleCount;
-  info.actual.seg = seg;
+  info.actual.gridSegments = `${grid.segX}x${grid.segY}`;
+  info.actual.geometrySharing = 'shared-single-mesh';
+  info.actual.uniqueGeometryResources = new Set(
+    objects.map(entity => entity.render.meshInstances[0].mesh)).size;
   info.actual.totalTriangles = grid.triangleCount * objectCount;
   info.actual.vertexCountPerMesh = grid.vertexCount;
 }
@@ -286,7 +294,7 @@ if (params.shadowCasters > 0) {
 const visibilityObjects = [];
 if (params.visibilityObjects > 0) {
   const { box, mesh } = createBoxMesh();
-  const layout = buildVisibilityLayout(params.visibilityObjects, params.visibleFraction);
+  const layout = buildVisibilityLayout(params.visibilityObjects, { visibleCount: params.visibleCount });
   const mat = new pc.StandardMaterial();
   mat.diffuse = new pc.Color(0.44, 0.65, 0.78);
   mat.update();
@@ -334,7 +342,11 @@ if (params.raycastTargets > 0 && params.raycasts > 0) {
 // ---- Physics: Ammo ----
 const physBodies = [];
 const PHYS_DT = 1 / 60;
-const physicsClock = createFixedStepClock({ stepSeconds: PHYS_DT });
+let physicsSteps = 0;
+let physRenderInstanceData = null;
+let physRenderInstanceBuffer = null;
+const physRenderMatrix = new pc.Mat4();
+const physRenderScale = new pc.Vec3(1, 1, 1);
 if (params.bodies > 0) {
   // PlayCanvas rigidbody requires an Ammo build that exports addFunction.
   await new Promise((resolve, reject) => {
@@ -375,18 +387,43 @@ if (params.bodies > 0) {
   bMat.diffuse = new pc.Color(0.75, 0.50, 0.31); bMat.update();
   for (const it of L.items) {
     const e = new pc.Entity('pb' + it.i);
-    e.addComponent('render', { meshInstances: [new pc.MeshInstance(bMesh, bMat)] });
     e.setLocalPosition(it.x, it.y, it.z);
     // Add to the hierarchy before components so onEnable creates the native body.
     app.root.addChild(e);
     e.addComponent('collision', { type: 'box', halfExtents: new pc.Vec3(L.size/2, L.size/2, L.size/2) });
     e.addComponent('rigidbody', { type: 'dynamic', mass: it.mass });
+    e.rigidbody.body.setActivationState(pc.BODYSTATE_DISABLE_DEACTIVATION);
     e.rigidbody.linearVelocity = new pc.Vec3(it.vx, 0, it.vz);
     physBodies.push(e);
   }
+  physRenderInstanceData = new Float32Array(L.items.length * 16);
+  for (let i = 0; i < L.items.length; i++) {
+    const e = physBodies[i];
+    physRenderMatrix.setTRS(e.getPosition(), e.getRotation(), physRenderScale);
+    physRenderInstanceData.set(physRenderMatrix.data, i * 16);
+  }
+  physRenderInstanceBuffer = new pc.VertexBuffer(
+    app.graphicsDevice,
+    pc.VertexFormat.getDefaultInstancingFormat(app.graphicsDevice),
+    L.items.length,
+    { data: physRenderInstanceData, usage: pc.BUFFER_DYNAMIC });
+  const physRenderMi = new pc.MeshInstance(bMesh, bMat);
+  physRenderMi.setInstancing(physRenderInstanceBuffer, false);
+  physRenderMi.instancingCount = L.items.length;
+  physRenderMi.cull = false;
+  const physRenderEntity = new pc.Entity('physicsRender');
+  physRenderEntity.addComponent('render', { meshInstances: [physRenderMi] });
+  app.root.addChild(physRenderEntity);
   info.actual.bodies = physBodies.length;
   info.actual.physFixedStep = PHYS_DT;
-  // Replace automatic updates with the shared fixed-step clock.
+  info.actual.physStepsPerFrame = 1;
+  info.actual.physicsSleepingAllowed = false;
+  info.actual.physicsInstanced = true;
+  info.actual.expectedPhysicsDrawCalls = 2;
+  info.actual.expectedPhysicsTriangles = L.items.length * 12 + 12;
+  info.actual.totalTriangles = L.items.length * 12;
+  info.actual.vertexCountPerMesh = 24;
+  // Replace automatic advancement; the benchmark performs one fixed step per rendered frame.
   app.systems.off('update', app.systems.rigidbody.onUpdate, app.systems.rigidbody);
 }
 
@@ -404,6 +441,8 @@ if (params.skinned > 0) {
     ent.setLocalEulerAngles(0, it.rotationY * 180 / Math.PI, 0);
     ent.addComponent('anim', { activate: !!params.animate });
     app.root.addChild(ent);
+    const renderComponent = ent.findComponent('render');
+    for (const meshInstance of renderComponent?.meshInstances || []) meshInstance.cull = false;
     ent.anim.assignAnimation('wiggle', animAsset.resource);
     // Offset animation phases across characters.
     if (ent.anim.baseLayer) ent.anim.baseLayer.activeStateCurrentTime = (it.i % 24) / 24 * 2.0;
@@ -415,6 +454,9 @@ if (params.skinned > 0) {
   const rc = skinnedChars[0]?.findComponent?.('render');
   info.actual.bonesPerChar = rc?.meshInstances?.[0]?.skinInstance?.bones?.length ?? null;
   info.actual.animChannels = animAsset?.resource?._curves?.length ?? null;
+  info.actual.expectedSkinnedDrawCalls = skinnedChars.length;
+  info.actual.expectedSkinnedTriangles = skinnedChars.length * 4672;
+  info.actual.totalTriangles = info.actual.expectedSkinnedTriangles;
 }
 
 // ---- overdraw ----
@@ -592,7 +634,14 @@ function engineTick(t, dt) {
   app.renderNextFrame = true;
   app.update(1 / 60);
   if (params.animate && physBodies.length) {
-    physicsClock.advance(dt, (step) => app.systems.rigidbody.onUpdate(step));
+    app.systems.rigidbody.onUpdate(PHYS_DT);
+    physicsSteps++;
+    for (let i = 0; i < physBodies.length; i++) {
+      const e = physBodies[i];
+      physRenderMatrix.setTRS(e.getPosition(), e.getRotation(), physRenderScale);
+      physRenderInstanceData.set(physRenderMatrix.data, i * 16);
+    }
+    physRenderInstanceBuffer.setData(physRenderInstanceData);
   }
   app.render();
 }
@@ -603,6 +652,14 @@ window.__SCENE_REFS__ = { pc, app, camEnt, physBodies };
 runLoop({
   state, info, params, engineTick, gpuTimer,
   onFinish() {
+    if (shadowLights.length) {
+      const internals = shadowLights.map(entity => entity.light.light);
+      const maps = internals.map(light => light._shadowMap).filter(Boolean);
+      const sizes = maps.map(map => map.texture?.width ?? map.renderTargets?.[0]?.width).filter(Number.isFinite);
+      info.actual.shadowMapSize = sizes[0] ?? internals[0]._shadowResolution ?? null;
+      info.actual.shadowMaps = new Set(maps).size;
+      info.actual.shadowNear = internals[0].getRenderData(null, 0).shadowCamera.nearClip;
+    }
     info.framebufferCoverage = measureFramebufferCoverage(canvas, CONTRACT.clearColor);
     if (overdrawMaterial) info.actual.overdrawActiveSamplers = inspectActiveSamplers(device.gl);
     if (overdrawMaterial) {
@@ -627,7 +684,11 @@ runLoop({
       triangles: st?.frame?.triangles ?? null,
       shaders: st?.frame?.shaders ?? null,
     };
-    if (physicsClock.totalSteps) info.actual.physSteps = physicsClock.totalSteps;
+    if (physicsSteps) {
+      info.actual.physSteps = physicsSteps;
+      info.actual.physicsSleepingBodies = physBodies.reduce(
+        (count, entity) => count + (entity.rigidbody.body.isActive() ? 0 : 1), 0);
+    }
     if (raycastRays.length) {
       info.actual.raycastHits = raycastHits;
       info.actual.raycastParity = raycastHits === raycastExpectedHits;

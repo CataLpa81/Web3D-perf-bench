@@ -80,10 +80,10 @@
 
 <div id="hud">
   <div class="m" id="mEngine"><div class="k">Engine</div><div class="v">–</div></div>
-  <div class="m"><div class="k">Frame p50</div><div class="v"><span id="vP50">–</span><span class="u"> ms</span></div></div>
-  <div class="m"><div class="k">Frame p95</div><div class="v"><span id="vP95">–</span><span class="u"> ms</span></div></div>
+  <div class="m"><div class="k">CPU tick p50</div><div class="v"><span id="vP50">–</span><span class="u"> ms</span></div></div>
+  <div class="m"><div class="k">CPU tick p95</div><div class="v"><span id="vP95">–</span><span class="u"> ms</span></div></div>
   <div class="m"><div class="k">GPU p95</div><div class="v"><span id="vGpu">–</span><span class="u"> ms</span></div></div>
-  <div class="m"><div class="k">FPS</div><div class="v" id="vFps">–</div></div>
+  <div class="m"><div class="k">CPU throughput</div><div class="v" id="vFps">–</div></div>
   <div class="m"><div class="k">Draw call</div><div class="v" id="vDraw">–</div></div>
   <div class="m"><div class="k">Triangles/frame</div><div class="v" id="vTri">–</div></div>
   <div class="m"><div class="k">Resolution</div><div class="v" id="vRes" style="font-size:14px">–</div></div>
@@ -167,8 +167,8 @@ function buildCapToggles() {
 // The benchmark cap is 300 FPS. The 60 FPS option is for visual inspection only.
 function updateCapNote() {
   $('capNote').innerHTML = curCap === CONTRACT.frameRateCap
-    ? `<b>Capped at ${CONTRACT.frameRateCap} FPS</b> for benchmark runs. Differences below about 3.33 ms are clipped by the cap.`
-    : '<b>Capped at 60 FPS</b> for visual inspection. Frame time is raised to about 16.6 ms.';
+    ? `<b>Capped at ${CONTRACT.frameRateCap} FPS</b>. CPU tick timing excludes scheduler wait; callback cadence remains capped.`
+    : '<b>Capped at 60 FPS</b> for visual inspection. CPU tick timing still excludes scheduler wait.';
 }
 
 function buildEngineToggles() {
@@ -188,10 +188,13 @@ function currentParams() {
 function showParams() {
   const c = CASES[curCase], p = currentParams();
   const keys = ['objects', 'triangles', 'lights', 'coverage', 'shadowCasters', 'shadowLights', 'shadowMapSize',
-                'visibilityObjects', 'visibleFraction', 'raycasts', 'raycastTargets',
+                'visibilityObjects', 'visibleCount', 'raycasts', 'raycastTargets',
                 'skinned', 'bodies', 'animate'];
   const shown = keys.filter(k => p[k]).map(k => `${k}=<b>${p[k]}</b>`);
-  const bits = [`<span style="opacity:.55">${DOMAINS[c.domain].title}</span>`];
+  const bits = [
+    `<span style="opacity:.55">${DOMAINS[c.domain].title}</span>`,
+    `<span style="opacity:.55">${c.suite || 'normalized-workload'}</span>`,
+  ];
   if (shown.length) bits.push(shown.join(' · '));
   $('params').innerHTML = bits.join(' ｜ ')
     + (c.note ? `<span style="opacity:.65"> — ${c.note}</span>` : '');

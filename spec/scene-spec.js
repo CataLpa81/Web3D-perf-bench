@@ -3,15 +3,20 @@ import { mulberry32 } from './contract.js';
 
 // A segmented grid controls triangles per mesh. Babylon right-handed mode reverses winding.
 export function buildGrid(seg, flipWinding = false) {
-  const vw = seg + 1;
-  const positions = new Float32Array(vw * vw * 3);
-  const normals = new Float32Array(vw * vw * 3);
-  const uvs = new Float32Array(vw * vw * 2);
-  const indices = new Uint32Array(seg * seg * 6);
+  return buildRectGrid(seg, seg, flipWinding);
+}
+
+export function buildRectGrid(segX, segY, flipWinding = false) {
+  const vx = segX + 1;
+  const vy = segY + 1;
+  const positions = new Float32Array(vx * vy * 3);
+  const normals = new Float32Array(vx * vy * 3);
+  const uvs = new Float32Array(vx * vy * 2);
+  const indices = new Uint32Array(segX * segY * 6);
   let p = 0;
-  for (let y = 0; y < vw; y++) {
-    for (let x = 0; x < vw; x++, p++) {
-      const fx = x / seg, fy = y / seg;
+  for (let y = 0; y < vy; y++) {
+    for (let x = 0; x < vx; x++, p++) {
+      const fx = x / segX, fy = y / segY;
       positions[p * 3 + 0] = (fx - 0.5) * 2;
       positions[p * 3 + 1] = Math.sin(x * 0.6) * Math.cos(y * 0.6) * 0.25;
       positions[p * 3 + 2] = (fy - 0.5) * 2;
@@ -20,9 +25,9 @@ export function buildGrid(seg, flipWinding = false) {
     }
   }
   let k = 0;
-  for (let y = 0; y < seg; y++) {
-    for (let x = 0; x < seg; x++) {
-      const a = y * vw + x, b = a + 1, c = a + vw, d = c + 1;
+  for (let y = 0; y < segY; y++) {
+    for (let x = 0; x < segX; x++) {
+      const a = y * vx + x, b = a + 1, c = a + vx, d = c + 1;
       if (flipWinding) {
         indices[k++] = b; indices[k++] = c; indices[k++] = a;
         indices[k++] = d; indices[k++] = c; indices[k++] = b;
@@ -33,11 +38,24 @@ export function buildGrid(seg, flipWinding = false) {
     }
   }
   return {
-    seg, positions, normals, uvs, indices,
-    vertexCount: vw * vw,
-    indexCount: seg * seg * 6,
-    triangleCount: seg * seg * 2,
+    segX, segY, positions, normals, uvs, indices,
+    vertexCount: vx * vy,
+    indexCount: segX * segY * 6,
+    triangleCount: segX * segY * 2,
   };
+}
+
+// Build an exact per-mesh triangle count for draw-submission and lighting cases.
+export function buildGridForTotalTriangles(totalTris, meshCount, flipWinding = false) {
+  const perMesh = totalTris / meshCount;
+  if (!Number.isInteger(perMesh) || perMesh % 2 !== 0) {
+    throw new Error(`total triangles ${totalTris} cannot be divided exactly across ${meshCount} meshes`);
+  }
+  const cells = perMesh / 2;
+  let segX = Math.floor(Math.sqrt(cells));
+  while (segX > 1 && cells % segX !== 0) segX--;
+  const segY = cells / segX;
+  return buildRectGrid(segX, segY, flipWinding);
 }
 
 // Shared two-triangle quad for the PBR pixel test.
@@ -156,13 +174,6 @@ export function buildUvSphere(widthSegments = 20, heightSegments = 15, flipWindi
   };
 }
 
-// Resolve grid segmentation from target total triangles and mesh count.
-export function segForTriangles(totalTris, meshCount) {
-  const perMesh = totalTris / meshCount;
-  const seg = Math.max(1, Math.round(Math.sqrt(perMesh / 2)));
-  return seg;
-}
-
 // The same count and seed produce identical transforms.
 export function buildObjectLayout(count, opts = {}) {
   const seed = opts.seed ?? 0x9e37;
@@ -269,8 +280,11 @@ export function shadowLightLayoutSignature(lights) {
 }
 
 // Keep a deterministic fraction in view while the remainder stays far outside the fixed frustum.
-export function buildVisibilityLayout(count, visibleFraction = 0.1) {
-  const visibleCount = Math.max(1, Math.round(count * visibleFraction));
+export function buildVisibilityLayout(count, opts = {}) {
+  const requestedVisible = typeof opts === 'number'
+    ? Math.max(1, Math.round(count * opts))
+    : (opts.visibleCount ?? Math.max(1, Math.round(count * (opts.visibleFraction ?? 0.1))));
+  const visibleCount = Math.min(count, requestedVisible);
   const items = [];
   const addVolume = (n, visible, centerX) => {
     const side = Math.ceil(Math.cbrt(n));
@@ -292,7 +306,13 @@ export function buildVisibilityLayout(count, visibleFraction = 0.1) {
   };
   addVolume(visibleCount, true, 0);
   addVolume(count - visibleCount, false, 260);
-  return { items, count, visibleCount, hiddenCount: count - visibleCount, visibleFraction };
+  return {
+    items,
+    count,
+    visibleCount,
+    hiddenCount: count - visibleCount,
+    visibleFraction: count ? visibleCount / count : 0,
+  };
 }
 
 // Rays descend through unique grid cells, producing one AABB hit per query.
@@ -369,31 +389,41 @@ export function buildOverdrawLayout(layers, opts = {}) {
   };
 }
 
-// Layered falling boxes create sustained collision and stacking work.
+// Independent short towers keep collision density per body stable as count grows.
 export function buildPhysicsLayout(count, opts = {}) {
   const rnd = mulberry32(opts.seed ?? 0x9b0d);
   const size = opts.size ?? 0.8;
-  const perRow = opts.perRow ?? 10;
-  const spacing = size * 1.6;
-  // Keep bodies active throughout the sampling window.
-  const layerGap = spacing * 3.0;
-  const baseHeight = opts.baseHeight ?? 8;
+  const stackHeight = opts.stackHeight ?? 10;
+  const towerCount = Math.ceil(count / stackHeight);
+  const towersPerRow = Math.ceil(Math.sqrt(towerCount));
+  const towerSpacing = size * 2.2;
+  const layerGap = size * 1.18;
+  const baseHeight = opts.baseHeight ?? 1.2;
   const items = [];
   for (let i = 0; i < count; i++) {
-    const layer = Math.floor(i / (perRow * perRow));
-    const inLayer = i % (perRow * perRow);
-    const col = inLayer % perRow;
-    const row = Math.floor(inLayer / perRow);
+    const tower = Math.floor(i / stackHeight);
+    const layer = i % stackHeight;
+    const col = tower % towersPerRow;
+    const row = Math.floor(tower / towersPerRow);
     items.push({
       i,
-      x: (col - perRow / 2) * spacing + (rnd() - 0.5) * size * 0.15,
+      x: (col - (towersPerRow - 1) / 2) * towerSpacing + (rnd() - 0.5) * size * 0.08,
       y: baseHeight + layer * layerGap,
-      z: (row - perRow / 2) * spacing + (rnd() - 0.5) * size * 0.15,
+      z: (row - (towersPerRow - 1) / 2) * towerSpacing + (rnd() - 0.5) * size * 0.08,
       size,
       mass: 1,
-      vx: (rnd() - 0.5) * 2.5,
-      vz: (rnd() - 0.5) * 2.5,
+      vx: (rnd() - 0.5) * 0.4,
+      vz: (rnd() - 0.5) * 0.4,
     });
   }
-  return { items, size, count, groundSize: perRow * spacing * 2.2, layerGap, baseHeight };
+  return {
+    items,
+    size,
+    count,
+    groundSize: towersPerRow * towerSpacing * 1.2,
+    layerGap,
+    baseHeight,
+    stackHeight,
+    towerCount,
+  };
 }

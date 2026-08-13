@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>three.js / Babylon.js / PlayCanvas Benchmark — full-current-2026-08-13</title>
+<style>
+:root{--fg:#1a1a1a;--dim:#666;--line:#e2e2e2;--ok:#0a7a3d;--warn:#a86400;--bad:#c0392b}
+*{box-sizing:border-box}
+body{font:14px/1.6 -apple-system,"Helvetica Neue",Arial,sans-serif;color:var(--fg);max-width:1080px;margin:0 auto;padding:32px 24px 64px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:36px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--fg)}
+h3{font-size:15px;margin:26px 0 6px}h3 .ax{font-weight:400;font-size:12px;color:var(--dim)}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-variant-numeric:tabular-nums}
+th,td{border:1px solid var(--line);padding:5px 9px;text-align:right}
+th{background:#fafafa;font-weight:600;text-align:center;font-size:12px}
+td.cs,td.ax,td.v{text-align:left}td.v{font-weight:600}
+td.ok{color:var(--ok)}td.warn{color:var(--warn)}td.bad{color:var(--bad);font-weight:600}
+td.na,td.lim{color:var(--dim);font-size:12px;text-align:center}
+td.lim{color:var(--bad)}
+td.dim{color:var(--dim);font-size:12px}
+td.diff{color:var(--warn)}
+td.sat{color:var(--dim)}
+tr.grp td{text-align:left;background:#f2f4f7;font-weight:600;font-size:12px;letter-spacing:.04em}
+.meta{color:var(--dim);font-size:12px;margin:0 0 2px}
+.note{color:var(--dim);font-size:12px;margin:4px 0}
+.fixed{font-size:12px;color:var(--dim);margin:2px 0 6px}
+.warnbox{border-left:3px solid var(--warn);background:#fffdf7;padding:9px 12px;margin:12px 0;color:var(--fg)}
+.warnbox ul{margin:5px 0;padding-left:20px}
+.caveat{border-left:3px solid var(--bad);background:#fdf6f5;padding:10px 13px;margin:14px 0}
+table.lit{width:auto}table.lit th,table.lit td{padding:3px 12px}
+code{font:11px ui-monospace,Menlo,monospace;color:var(--dim)}
+ul{padding-left:22px}li{margin:3px 0}
+.legend{font-size:11px;color:var(--dim);margin-top:6px}
+</style></head><body>
+
+<h1>three.js / Babylon.js / PlayCanvas Benchmark</h1>
+<p class="meta">Batch <code>full-current-2026-08-13</code>
+  · 6s per run × 5 repeat
+  · valid 625/630</p>
+<p class="meta">Apple M5 Pro · ANGLE (Apple, ANGLE Metal Renderer: Apple M5 Pro, Unspecified Version)</p>
+<p class="meta">three 0.185.1 · Babylon 9.20.0 · PlayCanvas 2.21.3</p>
+<p class="meta">commit <code>789878b633db33f5e1453eaa86da185cfac7a9d8</code>
+  · dirty true · schema 2</p>
+
+<div class="caveat">
+<b>Scope: normalized workloads and default-behavior workloads are separate.</b>
+Normalized cases parity-gate submitted work and relevant render settings. Default-behavior cases preserve
+engine policy differences and are excluded from cross-engine capacity rankings.
+</div>
+
+<h2>Scope</h2>
+<p class="note">Cases are grouped by common game-engine bottlenecks. Each case varies one primary input.</p>
+<table>
+<thead><tr><th>Domain</th><th>Cases</th><th>Measured bottleneck</th></tr></thead>
+<tbody><tr>
+  <td class="cs"><b>Baseline</b></td>
+  <td class="cs">empty</td>
+  <td class="cs dim">Empty scene with only a camera and clear pass.</td></tr><tr>
+  <td class="cs"><b>Rendering</b></td>
+  <td class="cs">lights · lights-forward · shadows · shadow-maps · visibility · drawcalls · overdraw-pbr</td>
+  <td class="cs dim">Rendering bottlenecks split into lighting, shadows, visibility, draw submission, and PBR pixel cost.</td></tr><tr>
+  <td class="cs"><b>Interaction</b></td>
+  <td class="cs">raycast</td>
+  <td class="cs dim">CPU-side scene queries commonly used by selection, weapons, navigation, and gameplay.</td></tr><tr>
+  <td class="cs"><b>Animation</b></td>
+  <td class="cs">skinned</td>
+  <td class="cs dim">Combined animation sampling, bone-matrix updates, and skinning cost.</td></tr><tr>
+  <td class="cs"><b>Physics</b></td>
+  <td class="cs">physics</td>
+  <td class="cs dim">Complete renderer plus recommended third-party physics-library stacks.</td></tr></tbody>
+</table>
+
+<h2>Capacity Summary</h2>
+<p class="note"><b>Capacity</b> is the highest tested load whose selected p95 metric remains within budget.
+No value is interpolated between sparse rungs. A trailing <b>+</b> means every tested rung passed.</p>
+<table>
+<thead>
+<tr><th rowspan="2">Case</th><th rowspan="2">Variable</th><th colspan="3">capacity@60 (≤16.6ms)</th><th colspan="3">capacity@30 (≤33.3ms)</th></tr>
+<tr><th>three</th><th>babylon</th><th>playcanvas</th><th>three</th><th>babylon</th><th>playcanvas</th></tr>
+</thead>
+<tbody><tr class="grp"><td colspan="8">Rendering</td></tr><tr><td class="cs">lights-forward</td><td class="ax">lights</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">32+</td><td class="" title="bounded-invalid">16</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">32+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">32+</td><td class="" title="bounded-invalid">16</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">32+</td></tr><tr><td class="cs">shadows</td><td class="ax">shadowCasters</td><td class="" title="bounded">10k</td><td class="" title="bounded">10k</td><td class="" title="nonmonotonic">Not reached</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">20k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">20k+</td><td class="" title="nonmonotonic">Not reached</td></tr><tr><td class="cs">shadow-maps</td><td class="ax">shadowLights</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">8+</td><td class="" title="nonmonotonic">Not reached</td><td class="" title="nonmonotonic">Not reached</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">8+</td><td class="" title="nonmonotonic">Not reached</td><td class="" title="nonmonotonic">Not reached</td></tr><tr><td class="cs">visibility</td><td class="ax">visibilityObjects</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">20k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">20k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">20k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">20k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">20k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">20k+</td></tr><tr><td class="cs">drawcalls</td><td class="ax">objects</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">10k+</td><td class="" title="bounded">5k</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">10k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">10k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">10k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">10k+</td></tr><tr class="grp"><td colspan="8">Interaction</td></tr><tr><td class="cs">raycast</td><td class="ax">raycasts</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">128+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">128+</td><td class="" title="bounded">32</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">128+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">128+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">128+</td></tr><tr class="grp"><td colspan="8">Animation</td></tr><tr><td class="cs">skinned</td><td class="ax">skinned</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">1.2k+</td><td class="" title="bounded">600</td><td class="" title="bounded">600</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">1.2k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">1.2k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">1.2k+</td></tr><tr class="grp"><td colspan="8">Physics</td></tr><tr><td class="cs">physics</td><td class="ax">bodies</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">10k+</td><td class="" title="bounded">5k</td><td class="" title="bounded">2k</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">10k+</td><td class="sat" title="All tested rungs stayed within budget; the true limit is above the matrix.">10k+</td><td class="" title="bounded-invalid">5k</td></tr></tbody>
+</table>
+
+<p class="legend">p95 colors: <span style="color:var(--ok)">green ≤16.6ms (60 FPS)</span> ·
+<span style="color:var(--warn)">orange ≤33.3ms (30 FPS)</span> ·
+<span style="color:var(--bad)">red exceeds the 30 FPS budget</span>.
+"Submitted/frame" is measured by the WebGL probe rather than engine statistics. Orange values differ across engines,
+and should only occur in default-behavior cases.</p>
+<p class="note"><b>The default PBR fragment case is excluded from capacity ranking.</b>
+Default shaders differ in features and visual quality; this case reports their GPU cost under heavy pixel coverage
+and alpha blending.</p>
+
+<h2>Baseline</h2>
+<p class="note">Empty scene with only a camera and clear pass.</p>
+<section>
+    <h3>empty <span class="ax">variable: — · normalized-workload</span></h3>
+    <p class="note">Empty scene with only a camera and clear pass.</p>
+    <p class="fixed">Fixed: objects=0 · triangles=0 · animate=0</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">Load</th><th colspan="3">CPU tick p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">0</td><td class="ok">0.1<br><span class="dim">0.1–0.1 · CV 0%</span></td><td class="ok">0.2<br><span class="dim">0.1–0.2 · CV 22%</span></td><td class="ok">0.2<br><span class="dim">0.2–0.3 · CV 18%</span></td><td class="dim">50465</td><td class="dim">17378</td><td class="dim">7837</td><td class="dim ">0 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section>
+<h2>Rendering</h2>
+<p class="note">Rendering bottlenecks split into lighting, shadows, visibility, draw submission, and PBR pixel cost.</p>
+<section>
+    <h3>lights <span class="ax">variable: lights · default-behavior</span></h3>
+    <p class="note">Preserves each default lighting architecture: three.js forward lighting, Babylon.js maxSimultaneousLights=4, and PlayCanvas clustered lighting.</p>
+    <p class="fixed">Fixed: objects=300 · triangles=1200000 · animate=1</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">lights</th><th colspan="3">CPU tick p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">4</td><td class="ok">0.8<br><span class="dim">0.6–0.8 · CV 11%</span></td><td class="ok">2.5<br><span class="dim">2.4–2.6 · CV 3%</span></td><td class="ok">1.0<br><span class="dim">0.8–1.0 · CV 9%</span></td><td class="dim">1801</td><td class="dim">497</td><td class="dim">1385</td><td class="dim ">300 draw</td></tr><tr><td class="v">16</td><td class="ok">0.8<br><span class="dim">0.8–0.8 · CV 0%</span></td><td class="ok">2.4<br><span class="dim">2.3–2.6 · CV 5%</span></td><td class="ok">1.1<br><span class="dim">0.9–1.1 · CV 8%</span></td><td class="dim">1772</td><td class="dim">532</td><td class="dim">1310</td><td class="dim ">300 draw</td></tr><tr><td class="v">32</td><td class="ok">4.4<br><span class="dim">0.8–17.3 · CV 88%</span></td><td class="ok">2.5<br><span class="dim">2.3–2.6 · CV 4%</span></td><td class="ok">1.0<br><span class="dim">0.9–1.1 · CV 6%</span></td><td class="dim">1603</td><td class="dim">503</td><td class="dim">1396</td><td class="dim ">300 draw</td></tr><tr><td class="v">64</td><td class="bad">142.6<br><span class="dim">128.9–159.4 · CV 7%</span></td><td class="ok">2.4<br><span class="dim">2.3–2.6 · CV 4%</span></td><td class="na" title="STEADY_STATE_NOT_CONVERGED: windows=[8.899999976158142,7.700000047683716,2.599999964237213]; STEADY_STATE_NOT_CONVERGED: windows=[18.80000001192093,16.5,12.5]">Partial 3/5</td><td class="dim">25</td><td class="dim">513</td><td class="dim">–</td><td class="dim ">300 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    <div class="note warnbox">
+      <b>Do not quote the timing table without this context.</b>
+      The engines use different default lighting policies, so the number of lights that reach the pixel shader differs:
+      <ul><li><b>three</b>: forward-all-lights</li><li><b>babylon</b>: maxSimultaneousLights=4(default)</li><li><b>playcanvas</b>: clustered(maxLightsPerCell=255)</li></ul>
+      This case describes product defaults and is excluded from capacity ranking. Use <code>lights-forward</code>
+      for a parity-gated forward-light workload.
+    </div>
+  </section><section>
+    <h3>lights-forward <span class="ax">variable: lights · normalized-workload</span></h3>
+    <p class="note">All requested point lights affect every material using a non-clustered forward path.</p>
+    <p class="fixed">Fixed: objects=300 · triangles=1200000 · animate=1</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">lights</th><th colspan="3">CPU tick p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">4</td><td class="ok">0.8<br><span class="dim">0.8–0.8 · CV 0%</span></td><td class="ok">2.6<br><span class="dim">2.5–2.6 · CV 2%</span></td><td class="ok">0.9<br><span class="dim">0.7–1.0 · CV 12%</span></td><td class="dim">1797</td><td class="dim">488</td><td class="dim">1678</td><td class="dim ">300 draw</td></tr><tr><td class="v">8</td><td class="ok">0.8<br><span class="dim">0.8–0.8 · CV 0%</span></td><td class="ok">3.0<br><span class="dim">2.9–3.1 · CV 2%</span></td><td class="ok">0.9<br><span class="dim">0.8–1.0 · CV 7%</span></td><td class="dim">1770</td><td class="dim">438</td><td class="dim">1558</td><td class="dim ">300 draw</td></tr><tr><td class="v">16</td><td class="ok">0.8<br><span class="dim">0.8–0.8 · CV 0%</span></td><td class="ok">3.5<br><span class="dim">3.4–3.6 · CV 3%</span></td><td class="ok">1.0<br><span class="dim">1.0–1.0 · CV 0%</span></td><td class="dim">1819</td><td class="dim">452</td><td class="dim">1507</td><td class="dim ">300 draw</td></tr><tr><td class="v">32</td><td class="ok">6.4<br><span class="dim">0.8–18.3 · CV 80%</span></td><td class="na" title="STEADY_STATE_NOT_CONVERGED: windows=[9.399999976158142,18,10.899999976158142]">Partial 4/5</td><td class="ok">1.2<br><span class="dim">1.1–1.2 · CV 4%</span></td><td class="dim">1139</td><td class="dim">–</td><td class="dim">1135</td><td class="dim ">300 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section><section>
+    <h3>shadows <span class="ax">variable: shadowCasters · normalized-workload</span></h3>
+    <p class="note">One instanced draw of 1,000-20,000 moving 560-triangle sphere casters under one aligned hard-shadow spotlight and 2048x2048 map.</p>
+    <p class="fixed">Fixed: objects=0 · triangles=0 · lights=0 · shadowLights=1 · shadowMapSize=2048 · animate=1</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">shadowCasters</th><th colspan="3">CPU/GPU bottleneck p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">1k</td><td class="ok">2.6<br><span class="dim">2.5–5.6 · CV 36%</span><br><span class="dim">limited by gpu</span></td><td class="ok">2.6<br><span class="dim">2.4–5.4 · CV 37%</span><br><span class="dim">limited by gpu</span></td><td class="ok">5.0<br><span class="dim">2.2–5.5 · CV 37%</span><br><span class="dim">limited by gpu</span></td><td class="dim">561</td><td class="dim">560</td><td class="dim">592</td><td class="dim ">3 draw</td></tr><tr><td class="v">2.5k</td><td class="ok">4.8<br><span class="dim">3.6–6.0 · CV 18%</span><br><span class="dim">limited by gpu</span></td><td class="ok">4.6<br><span class="dim">4.0–5.8 · CV 14%</span><br><span class="dim">limited by gpu</span></td><td class="ok">3.9<br><span class="dim">3.9–5.9 · CV 19%</span><br><span class="dim">limited by gpu</span></td><td class="dim">408</td><td class="dim">382</td><td class="dim">337</td><td class="dim ">3 draw</td></tr><tr><td class="v">5k</td><td class="ok">7.0<br><span class="dim">6.7–7.9 · CV 6%</span><br><span class="dim">limited by gpu</span></td><td class="ok">7.4<br><span class="dim">6.3–7.8 · CV 7%</span><br><span class="dim">limited by gpu</span></td><td class="ok">6.3<br><span class="dim">6.2–7.7 · CV 9%</span><br><span class="dim">limited by gpu</span></td><td class="dim">209</td><td class="dim">208</td><td class="dim">185</td><td class="dim ">3 draw</td></tr><tr><td class="v">10k</td><td class="ok">11.4<br><span class="dim">10.6–14.1 · CV 10%</span><br><span class="dim">limited by gpu</span></td><td class="ok">11.6<br><span class="dim">10.9–14.4 · CV 11%</span><br><span class="dim">limited by gpu</span></td><td class="ok">11.1<br><span class="dim">10.0–14.4 · CV 14%</span><br><span class="dim">limited by gpu</span></td><td class="dim">146</td><td class="dim">142</td><td class="dim">146</td><td class="dim ">3 draw</td></tr><tr><td class="v">20k</td><td class="warn">20.3<br><span class="dim">17.0–20.9 · CV 9%</span><br><span class="dim">limited by gpu</span></td><td class="warn">18.9<br><span class="dim">16.5–21.5 · CV 9%</span><br><span class="dim">limited by gpu</span></td><td class="warn">18.7<br><span class="dim">16.3–19.9 · CV 7%</span><br><span class="dim">limited by gpu</span></td><td class="dim">72</td><td class="dim">75</td><td class="dim">77</td><td class="dim ">3 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section><section>
+    <h3>shadow-maps <span class="ax">variable: shadowLights · normalized-workload</span></h3>
+    <p class="note">One thousand moving 560-triangle instanced casters under 1-8 aligned hard-shadow spotlights; the 8-map rung submits 5.04 million triangles.</p>
+    <p class="fixed">Fixed: objects=0 · triangles=0 · lights=0 · shadowCasters=1000 · shadowMapSize=2048 · animate=1</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">shadowLights</th><th colspan="3">CPU/GPU bottleneck p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">1</td><td class="ok">2.6<br><span class="dim">2.5–5.0 · CV 30%</span><br><span class="dim">limited by gpu</span></td><td class="ok">2.6<br><span class="dim">2.3–2.7 · CV 5%</span><br><span class="dim">limited by gpu</span></td><td class="ok">3.1<br><span class="dim">2.2–5.6 · CV 40%</span><br><span class="dim">limited by gpu</span></td><td class="dim">540</td><td class="dim">555</td><td class="dim">611</td><td class="dim ">3 draw</td></tr><tr><td class="v">2</td><td class="ok">5.4<br><span class="dim">3.9–6.0 · CV 13%</span><br><span class="dim">limited by gpu</span></td><td class="ok">5.4<br><span class="dim">3.3–5.7 · CV 17%</span><br><span class="dim">limited by gpu</span></td><td class="ok">5.7<br><span class="dim">3.2–5.9 · CV 21%</span><br><span class="dim">limited by gpu</span></td><td class="dim">434</td><td class="dim">441</td><td class="dim">405</td><td class="dim ">4 draw</td></tr><tr><td class="v">4</td><td class="ok">5.2<br><span class="dim">4.9–6.6 · CV 12%</span><br><span class="dim">limited by gpu</span></td><td class="ok">5.0<br><span class="dim">4.9–6.7 · CV 12%</span><br><span class="dim">limited by gpu</span></td><td class="ok">4.6<br><span class="dim">3.4–6.4 · CV 25%</span><br><span class="dim">limited by gpu</span></td><td class="dim">344</td><td class="dim">232</td><td class="dim">488</td><td class="dim ">6 draw</td></tr><tr><td class="v">8</td><td class="ok">8.0<br><span class="dim">7.9–9.9 · CV 10%</span><br><span class="dim">limited by gpu</span></td><td class="ok">8.5<br><span class="dim">8.4–12.0 · CV 18%</span><br><span class="dim">limited by gpu</span></td><td class="ok">5.2<br><span class="dim">5.0–6.4 · CV 11%</span><br><span class="dim">limited by gpu</span></td><td class="dim">198</td><td class="dim">192</td><td class="dim">233</td><td class="dim ">10 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section><section>
+    <h3>visibility <span class="ax">variable: visibilityObjects · normalized-workload</span></h3>
+    <p class="note">Keeps 100 visible boxes fixed while increasing only out-of-frustum objects.</p>
+    <p class="fixed">Fixed: objects=0 · triangles=0 · visibleCount=100 · lights=1 · animate=0</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">visibilityObjects</th><th colspan="3">CPU tick p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">1k</td><td class="ok">0.5<br><span class="dim">0.5–0.6 · CV 8%</span></td><td class="ok">1.2<br><span class="dim">1.2–1.4 · CV 6%</span></td><td class="ok">0.6<br><span class="dim">0.5–0.6 · CV 9%</span></td><td class="dim">2672</td><td class="dim">1143</td><td class="dim">2585</td><td class="dim ">100 draw</td></tr><tr><td class="v">5k</td><td class="ok">1.8<br><span class="dim">1.7–1.9 · CV 4%</span></td><td class="ok">3.2<br><span class="dim">3.1–3.3 · CV 2%</span></td><td class="ok">1.0<br><span class="dim">0.9–1.1 · CV 7%</span></td><td class="dim">771</td><td class="dim">404</td><td class="dim">1361</td><td class="dim ">100 draw</td></tr><tr><td class="v">10k</td><td class="ok">2.8<br><span class="dim">2.7–3.0 · CV 4%</span></td><td class="ok">3.8<br><span class="dim">3.7–3.9 · CV 2%</span></td><td class="ok">1.7<br><span class="dim">1.6–1.8 · CV 4%</span></td><td class="dim">411</td><td class="dim">294</td><td class="dim">783</td><td class="dim ">100 draw</td></tr><tr><td class="v">20k</td><td class="ok">3.7<br><span class="dim">3.6–3.8 · CV 2%</span></td><td class="ok">7.2<br><span class="dim">7.0–7.3 · CV 1%</span></td><td class="ok">2.6<br><span class="dim">2.3–2.8 · CV 7%</span></td><td class="dim">414</td><td class="dim">147</td><td class="dim">490</td><td class="dim ">100 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section><section>
+    <h3>drawcalls <span class="ax">variable: objects · normalized-workload</span></h3>
+    <p class="note">Keeps total geometry near 1.2M triangles while increasing independent mesh count.</p>
+    <p class="fixed">Fixed: triangles=1200000 · lights=1 · animate=1</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">objects</th><th colspan="3">CPU tick p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">500</td><td class="ok">1.1<br><span class="dim">1.1–1.2 · CV 4%</span></td><td class="ok">2.7<br><span class="dim">2.6–2.7 · CV 2%</span></td><td class="ok">1.2<br><span class="dim">1.2–1.3 · CV 3%</span></td><td class="dim">1310</td><td class="dim">448</td><td class="dim">1241</td><td class="dim ">500 draw</td></tr><tr><td class="v">2k</td><td class="ok">2.9<br><span class="dim">2.8–2.9 · CV 2%</span></td><td class="ok">4.4<br><span class="dim">4.4–4.6 · CV 2%</span></td><td class="ok">2.8<br><span class="dim">2.6–3.0 · CV 5%</span></td><td class="dim">509</td><td class="dim">268</td><td class="dim">517</td><td class="dim ">2k draw</td></tr><tr><td class="v">5k</td><td class="ok">3.3<br><span class="dim">3.2–4.5 · CV 14%</span></td><td class="ok">11.8<br><span class="dim">11.5–12.1 · CV 2%</span></td><td class="ok">3.2<br><span class="dim">3.1–3.6 · CV 5%</span></td><td class="dim">350</td><td class="dim">88</td><td class="dim">369</td><td class="dim ">5k draw</td></tr><tr><td class="v">10k</td><td class="ok">8.3<br><span class="dim">7.9–8.7 · CV 3%</span></td><td class="warn">22.7<br><span class="dim">22.3–23.2 · CV 1%</span></td><td class="ok">6.5<br><span class="dim">6.3–7.2 · CV 5%</span></td><td class="dim">138</td><td class="dim">45</td><td class="dim">170</td><td class="dim ">10k draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section><section>
+    <h3>overdraw-pbr <span class="ax">variable: coverage · default-behavior</span></h3>
+    <p class="note">Full-screen transparent layers with alpha 0.1, deterministic motion, and the same four 512x512 PBR maps. Uses each engine default lit PBR material and GPU p95.</p>
+    <p class="fixed">Fixed: objects=0 · lights=0 · animate=1</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">coverage</th><th colspan="3">GPU p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">8</td><td class="ok">5.3<br><span class="dim">3.4–5.7 · CV 17%</span></td><td class="ok">4.5<br><span class="dim">3.9–5.2 · CV 11%</span></td><td class="ok">5.8<br><span class="dim">3.8–6.5 · CV 17%</span></td><td class="dim">464</td><td class="dim">452</td><td class="dim">400</td><td class="dim ">1 draw</td></tr><tr><td class="v">32</td><td class="ok">10.1<br><span class="dim">9.6–12.4 · CV 10%</span></td><td class="ok">12.5<br><span class="dim">11.1–13.7 · CV 9%</span></td><td class="ok">10.1<br><span class="dim">9.5–12.1 · CV 9%</span></td><td class="dim">165</td><td class="dim">139</td><td class="dim">160</td><td class="dim ">1 draw</td></tr><tr><td class="v">64</td><td class="warn">18.1<br><span class="dim">14.4–21.9 · CV 14%</span></td><td class="warn">17.8<br><span class="dim">15.4–21.3 · CV 12%</span></td><td class="warn">18.0<br><span class="dim">15.0–19.8 · CV 9%</span></td><td class="dim">72</td><td class="dim">69</td><td class="dim">84</td><td class="dim ">1 draw</td></tr><tr><td class="v">128</td><td class="warn">17.4<br><span class="dim">16.1–19.0 · CV 6%</span></td><td class="warn">17.1<br><span class="dim">16.0–19.0 · CV 6%</span></td><td class="warn">18.7<br><span class="dim">18.3–20.9 · CV 5%</span></td><td class="dim">64</td><td class="dim">68</td><td class="dim">68</td><td class="dim ">1 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section>
+<h2>Interaction</h2>
+<p class="note">CPU-side scene queries commonly used by selection, weapons, navigation, and gameplay.</p>
+<section>
+    <h3>raycast <span class="ax">variable: raycasts · normalized-workload</span></h3>
+    <p class="note">Per-frame linear AABB ray queries using each engine math API; every ray has one deterministic hit.</p>
+    <p class="fixed">Fixed: objects=0 · triangles=0 · raycastTargets=5000 · lights=0 · animate=0</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">raycasts</th><th colspan="3">CPU tick p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">1</td><td class="ok">0.2<br><span class="dim">0.2–0.2 · CV 0%</span></td><td class="ok">0.3<br><span class="dim">0.3–0.3 · CV 0%</span></td><td class="ok">0.8<br><span class="dim">0.7–0.8 · CV 6%</span></td><td class="dim">9635</td><td class="dim">5708</td><td class="dim">1866</td><td class="dim ">0 draw</td></tr><tr><td class="v">8</td><td class="ok">0.9<br><span class="dim">0.9–1.0 · CV 4%</span></td><td class="ok">1.4<br><span class="dim">1.3–1.4 · CV 4%</span></td><td class="ok">2.9<br><span class="dim">2.8–3.0 · CV 2%</span></td><td class="dim">1730</td><td class="dim">1048</td><td class="dim">428</td><td class="dim ">0 draw</td></tr><tr><td class="v">32</td><td class="ok">2.8<br><span class="dim">2.6–2.8 · CV 3%</span></td><td class="ok">3.0<br><span class="dim">2.9–3.1 · CV 2%</span></td><td class="ok">4.3<br><span class="dim">4.2–4.3 · CV 1%</span></td><td class="dim">451</td><td class="dim">427</td><td class="dim">242</td><td class="dim ">0 draw</td></tr><tr><td class="v">128</td><td class="ok">3.2<br><span class="dim">3.2–3.4 · CV 2%</span></td><td class="ok">4.9<br><span class="dim">4.7–5.0 · CV 2%</span></td><td class="warn">18.0<br><span class="dim">16.5–18.6 · CV 5%</span></td><td class="dim">328</td><td class="dim">217</td><td class="dim">59</td><td class="dim ">0 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section>
+<h2>Animation</h2>
+<p class="note">Combined animation sampling, bone-matrix updates, and skinning cost.</p>
+<section>
+    <h3>skinned <span class="ax">variable: skinned · normalized-workload</span></h3>
+    <p class="note">CesiumMan: 19 bones, 4,672 triangles, 57 animation channels, and one texture.</p>
+    <p class="fixed">Fixed: objects=0 · triangles=0 · lights=1 · animate=1</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">skinned</th><th colspan="3">CPU tick p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">100</td><td class="ok">2.0<br><span class="dim">1.9–2.0 · CV 2%</span></td><td class="ok">3.3<br><span class="dim">3.0–3.4 · CV 6%</span></td><td class="ok">2.9<br><span class="dim">2.7–3.0 · CV 4%</span></td><td class="dim">740</td><td class="dim">461</td><td class="dim">568</td><td class="dim ">100 draw</td></tr><tr><td class="v">300</td><td class="ok">3.5<br><span class="dim">3.2–3.8 · CV 7%</span></td><td class="ok">7.6<br><span class="dim">7.2–7.6 · CV 2%</span></td><td class="ok">5.3<br><span class="dim">4.8–5.5 · CV 4%</span></td><td class="dim">345</td><td class="dim">141</td><td class="dim">215</td><td class="dim ">300 draw</td></tr><tr><td class="v">600</td><td class="ok">7.2<br><span class="dim">6.5–8.5 · CV 9%</span></td><td class="ok">14.1<br><span class="dim">13.7–14.2 · CV 1%</span></td><td class="ok">10.4<br><span class="dim">9.9–12.1 · CV 7%</span></td><td class="dim">152</td><td class="dim">73</td><td class="dim">101</td><td class="dim ">600 draw</td></tr><tr><td class="v">1.2k</td><td class="ok">14.9<br><span class="dim">14.6–15.2 · CV 1%</span></td><td class="warn">28.5<br><span class="dim">27.6–28.9 · CV 2%</span></td><td class="warn">21.8<br><span class="dim">21.4–26.4 · CV 8%</span></td><td class="dim">70</td><td class="dim">37</td><td class="dim">47</td><td class="dim ">1.2k draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section>
+<h2>Physics</h2>
+<p class="note">Complete renderer plus recommended third-party physics-library stacks.</p>
+<section>
+    <h3>physics <span class="ax">variable: bodies · normalized-workload</span></h3>
+    <p class="note">Box stacks with sleeping disabled, one fixed step per frame, and aligned one-draw instanced rendering.</p>
+    <p class="fixed">Fixed: objects=0 · triangles=0 · lights=1 · animate=1 · maxWarmupMs=30000 · maxDurationMs=120000</p>
+    <table>
+      <thead>
+        <tr><th rowspan="2">bodies</th><th colspan="3">CPU tick p95 (ms)</th><th colspan="3">Throughput equivalent</th><th rowspan="2">Submitted/frame</th></tr>
+        <tr><th>three</th><th>babylon</th><th>playcanvas</th><th class="dim">three</th><th class="dim">babylon</th><th class="dim">playcanvas</th></tr>
+      </thead>
+      <tbody><tr><td class="v">500</td><td class="ok">2.0<br><span class="dim">1.9–2.5 · CV 10%</span></td><td class="ok">2.3<br><span class="dim">2.2–2.7 · CV 8%</span></td><td class="ok">3.2<br><span class="dim">3.1–3.6 · CV 5%</span></td><td class="dim">639</td><td class="dim">703</td><td class="dim">499</td><td class="dim ">2 draw</td></tr><tr><td class="v">2k</td><td class="ok">2.7<br><span class="dim">2.6–2.7 · CV 1%</span></td><td class="ok">4.3<br><span class="dim">3.9–4.6 · CV 6%</span></td><td class="ok">11.5<br><span class="dim">10.1–11.8 · CV 6%</span></td><td class="dim">395</td><td class="dim">279</td><td class="dim">103</td><td class="dim ">2 draw</td></tr><tr><td class="v">5k</td><td class="ok">6.7<br><span class="dim">6.6–6.9 · CV 2%</span></td><td class="ok">10.8<br><span class="dim">10.7–11.3 · CV 2%</span></td><td class="warn">31.8<br><span class="dim">22.2–38.0 · CV 20%</span></td><td class="dim">155</td><td class="dim">99</td><td class="dim">37</td><td class="dim ">2 draw</td></tr><tr><td class="v">10k</td><td class="ok">14.1<br><span class="dim">13.8–14.3 · CV 1%</span></td><td class="warn">22.9<br><span class="dim">21.9–23.9 · CV 3%</span></td><td class="lim" title="RUNTIME_ERROR: Aborted(OOM). Build with -sASSERTIONS for more info.; INSUFFICIENT_STEADY_CPU_SAMPLES: 0 &lt; 180; NO_DRAW_CALLS: undefined; PHYSICS_SLEEPING_BODIES: n/a; PHYSICS_DRAWCALL_MISMATCH: expected=2 actual=n/a; PHYSICS_TRIANGLE_MISMATCH: expected=120012 actual=n/a">OUT_OF_MEMORY (3/5 valid)</td><td class="dim">73</td><td class="dim">45</td><td class="dim">–</td><td class="dim ">2 draw</td></tr></tbody>
+    </table>
+    <p class="note">Repeated runs show min–max and coefficient of variation. Timer callback interval is diagnostic only.</p>
+    
+  </section>
+
+<h2>Findings</h2>
+<h3>Engine limits</h3><p class="note">The engine could not execute these load levels.</p><ul><li><b>playcanvas</b> at physics@10000: OUT_OF_MEMORY
+    <br><code>Aborted(OOM). Build with -sASSERTIONS for more info.</code></li></ul>
+<h3>Runs blocked by the parity gate</h3><ul><li>playcanvas @ lights@64: STEADY_STATE_NOT_CONVERGED: windows=[8.899999976158142,7.700000047683716,2.599999964237213]</li><li>babylon @ lights-forward@32: STEADY_STATE_NOT_CONVERGED: windows=[9.399999976158142,18,10.899999976158142]</li><li>playcanvas @ lights@64: STEADY_STATE_NOT_CONVERGED: windows=[18.80000001192093,16.5,12.5]</li></ul>
+<h3>High repeat variance</h3><p class="note">CV above 10%; treat local rankings as unstable.</p><ul><li><b>babylon</b> at empty@0: CV 22.2%</li><li><b>playcanvas</b> at empty@0: CV 18.2%</li><li><b>three</b> at lights@32: CV 88.4%</li><li><b>three</b> at lights@4: CV 10.8%</li><li><b>playcanvas</b> at lights-forward@4: CV 11.9%</li><li><b>three</b> at lights-forward@32: CV 80.0%</li><li><b>three</b> at shadows@1000: CV 35.6%</li><li><b>babylon</b> at shadows@1000: CV 36.6%</li><li><b>playcanvas</b> at shadows@1000: CV 36.8%</li><li><b>three</b> at shadows@10000: CV 10.5%</li><li><b>babylon</b> at shadows@10000: CV 10.9%</li><li><b>playcanvas</b> at shadows@10000: CV 13.8%</li><li><b>three</b> at shadows@2500: CV 18.1%</li><li><b>babylon</b> at shadows@2500: CV 14.4%</li><li><b>playcanvas</b> at shadows@2500: CV 19.2%</li><li><b>three</b> at shadow-maps@4: CV 11.7%</li><li><b>babylon</b> at shadow-maps@4: CV 12.2%</li><li><b>playcanvas</b> at shadow-maps@4: CV 25.3%</li><li><b>three</b> at shadow-maps@1: CV 30.3%</li><li><b>playcanvas</b> at shadow-maps@1: CV 39.8%</li><li><b>three</b> at shadow-maps@8: CV 10.2%</li><li><b>babylon</b> at shadow-maps@8: CV 17.6%</li><li><b>playcanvas</b> at shadow-maps@8: CV 10.9%</li><li><b>three</b> at shadow-maps@2: CV 13.5%</li><li><b>babylon</b> at shadow-maps@2: CV 17.3%</li><li><b>playcanvas</b> at shadow-maps@2: CV 21.1%</li><li><b>three</b> at drawcalls@5000: CV 13.8%</li><li><b>three</b> at overdraw-pbr@64: CV 14.4%</li><li><b>babylon</b> at overdraw-pbr@64: CV 11.9%</li><li><b>three</b> at overdraw-pbr@8: CV 16.9%</li><li><b>babylon</b> at overdraw-pbr@8: CV 11.0%</li><li><b>playcanvas</b> at overdraw-pbr@8: CV 17.2%</li><li><b>three</b> at overdraw-pbr@32: CV 10.3%</li><li><b>three</b> at physics@500: CV 10.1%</li><li><b>playcanvas</b> at physics@5000: CV 20.1%</li></ul>
+
+
+<h2>Method</h2>
+<ul>
+<li><b>Shared source of truth:</b> all harnesses use the same geometry and layouts from <code>spec/</code>, with a seeded PRNG and no <code>Math.random</code>.</li>
+<li><b>Measured submission:</b> draw calls and triangles come from a WebGL probe rather than engine-reported statistics.</li>
+<li><b>Blocking parity gate:</b> real GPU, backbuffer size, equal inputs, sample count, visible output, and GPU timer validity must all pass.</li>
+<li><b>GPU timing:</b> GPU-timed cases use asynchronous backpressure with <code>EXT_disjoint_timer_query_webgl2</code>; the next frame waits for the current query result, and unsupported, insufficient, skipped, or disjoint samples are invalid.</li>
+<li><b>CPU timing:</b> CPU p95 measures the synchronous update-and-render submission call; timer callback intervals are diagnostic only.</li>
+<li><b>Steady state:</b> sampling starts after a minimum warmup and three converged CPU-p95 windows; heavy cases may extend to reach the sample floor.</li>
+<li><b>Run order:</b> load points are deterministically shuffled per repeat and engine order is counterbalanced.</li>
+<li><b>Provenance:</b> schema-v2 results embed the complete case matrix, contract, commit, lockfile hash, and browser environment.</li>
+<li><b>Run isolation:</b> every run receives a new browser context, page, WebGL context, and engine instance.</li>
+<li><b>Headless with vsync disabled:</b> the GPU gate rejects software rendering, and disabling vsync exposes frame times above display refresh.</li>
+</ul>
+
+</body></html>
